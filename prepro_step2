@@ -1,4 +1,4 @@
-
+#last error: ValueError: Invalid channel name(s) {'S23', 'Cz', 'S24'} are not present in info
 #!/usr/bin/env python3
 """
 Preprocessing pipeline for spinal and EEG data.
