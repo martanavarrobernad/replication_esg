@@ -1,19 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Created on Thu Jan  8 12:46:38 2026
-
-@author: navar
-"""
-
-# -*- coding: utf-8 -*-
-"""
 Created on Thu Jan  8 12:31:22 2026
 
 @author: navar
 """
-
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 from pathlib import Path
 import numpy as np
@@ -41,7 +32,7 @@ for participant in PARTICIPANTS:
         raw_file = RAW_PATH / f"MULTICONS_2025-12-16_Run{run}.vhdr"
         output_file = RAW_PATH / f"{participant}_Run{run}_eeg.fif"
 
-        raw = mne.io.read_raw_brainvision(raw_file, preload=True, verbose=False)
+        raw = mne.io.read_raw_brainvision(raw_file, preload=False, verbose=False)
         raw.resample(5000, npad="auto")
         sr = raw.info['sfreq']
 
@@ -59,7 +50,7 @@ for participant in PARTICIPANTS:
         # DETECT AND REMOVE ECG-CONTAMINATED EVENTS
         # ---------------------------------------------------------------------
         projs, events_ecg = mne.preprocessing.compute_proj_ecg(
-            raw, ch_name='ECG', reject=None, n_jobs=-1
+            raw, ch_name='ECG', reject=None, n_jobs=2
         )
 
         ecg_windows = [
@@ -67,9 +58,17 @@ for participant in PARTICIPANTS:
             for x in np.transpose(events_ecg)[0]
         ]
         ecg_samples = pd.Series(np.concatenate(ecg_windows))
-
+        
         clean_events = [e for e in events if e[0] not in ecg_samples.values]
-        raw.add_events(clean_events, replace=True)
+        clean_events = np.array(clean_events)
+        inv_event_id = {v: k for k, v in event_id.items()}
+        new_annot = mne.annotations_from_events(
+            clean_events,
+            sfreq=raw.info["sfreq"],
+            event_desc=inv_event_id
+        )
+
+        raw.set_annotations(new_annot)
 
         # ---------------------------------------------------------------------
         # SETUP ELECTRODE MONTAGE (FIEL A ACTICAP / BRAINVISION)
@@ -98,3 +97,4 @@ for participant in PARTICIPANTS:
         # ---------------------------------------------------------------------
         raw.save(output_file, overwrite=True)
         print(f"Saved cleaned file: {output_file}")
+
