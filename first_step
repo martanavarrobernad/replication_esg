@@ -42,6 +42,7 @@ for participant in PARTICIPANTS:
         output_file = RAW_PATH / f"{participant}_Run{run}_eeg.fif"
 
         raw = mne.io.read_raw_brainvision(raw_file, preload=True, verbose=False)
+        raw.resample(5000, npad="auto")
         sr = raw.info['sfreq']
 
         # ---------------------------------------------------------------------
