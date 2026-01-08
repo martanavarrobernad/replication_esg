@@ -1,0 +1,104 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Jan  8 14:37:39 2026
+
+@author: navar
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from pathlib import Path
+import numpy as np
+import mne
+
+# =============================================================================
+# CONFIG
+# =============================================================================
+RAW_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+PARTICIPANT = "sub-P01"
+RUNS = range(1, 7)  # Run1–Run6
+
+# EEG channels
+EEGCHANNELS = [
+    "Fp1","Fz","F3","F7","FT9","FC5","FC1","C3","T7","TP9",
+    "CP5","CP1","Pz","P3","P7","O1","Oz","O2","P4","P8",
+    "TP10","CP6","CP2","C4","T8","FT10","FC6","FC2","F4","F8",
+    "Fp2","AF7","AF3","AFz","F1","F5","FT7","FC3","C1","C5",
+    "TP7","CP3","P1","P5","PO7","PO3","POz","PO4","PO8","P6",
+    "P2","CPz","CP4","TP8","C6","C2","FC4","FT8","F6","AF8",
+    "AF4","F2"
+]
+
+# Spinal channels (incluye las referencias AC y TH6)
+SPINALCHANNELS = [
+    "Iz", "SC1", "SC6",
+    "S3", "S4", "S5", "S6", "S7", "S8", "S9",
+    "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19",
+    "AC", "TH6"
+]
+
+EEG_REF = "Fz"
+SPINAL_REF_TH6 = "TH6"
+SPINAL_REF_AC = "AC"
+
+TARGET_SFREQ = 5000  #None if you don't want to resample, we sampled at 10kHz so it was too heavy
+
+# =============================================================================
+# HELPERS
+# =============================================================================
+def reref_inplace(raw_obj: mne.io.BaseRaw, picks: list[str], ref_ch: str) -> None:
+    """Re-referencia: señal(picks) = señal(picks) - señal(ref_ch). No modifica ref_ch."""
+    if ref_ch not in raw_obj.ch_names:
+        raise ValueError(f"Reference channel '{ref_ch}' not found in raw.")
+
+    # quedarnos solo con canales que existen y no son el propio ref
+    picks = [ch for ch in picks if ch in raw_obj.ch_names and ch != ref_ch]
+    if not picks:
+        return
+
+    ref_sig = raw_obj.get_data(picks=[ref_ch])  # (1, n_times)
+    dat = raw_obj.get_data(picks=picks)         # (n_picks, n_times)
+    idx = [raw_obj.ch_names.index(ch) for ch in picks]
+    raw_obj._data[idx, :] = dat - ref_sig
+
+
+# =============================================================================
+# MAIN
+# =============================================================================
+for run in RUNS:
+    vhdr_file = RAW_PATH / f"MULTICONS_2025-12-16_Run{run}.vhdr"
+    print(f"\nLoading: {vhdr_file}")
+
+    raw = mne.io.read_raw_brainvision(vhdr_file, preload=False, verbose=False)
+
+    # Resample si procede
+    if TARGET_SFREQ is not None and raw.info["sfreq"] != TARGET_SFREQ:
+        raw.resample(TARGET_SFREQ, npad="auto")
+
+    # 1) EEG -> Fz
+    if EEG_REF not in raw.ch_names:
+        raise ValueError(f"EEG reference '{EEG_REF}' not found (run {run}).")
+    reref_inplace(raw, EEGCHANNELS, EEG_REF)
+
+    # 2) Crear dos copias y hacer SPINAL -> TH6 / AC
+    raw_refTH6 = raw.copy()
+    raw_refAC = raw.copy()
+
+    if SPINAL_REF_TH6 not in raw_refTH6.ch_names:
+        raise ValueError(f"Spinal reference '{SPINAL_REF_TH6}' not found (run {run}).")
+    if SPINAL_REF_AC not in raw_refAC.ch_names:
+        raise ValueError(f"Spinal reference '{SPINAL_REF_AC}' not found (run {run}).")
+
+    reref_inplace(raw_refTH6, SPINALCHANNELS, SPINAL_REF_TH6)
+    reref_inplace(raw_refAC,  SPINALCHANNELS, SPINAL_REF_AC)
+
+    # Guardar
+    out_th6 = RAW_PATH / f"{PARTICIPANT}_Run{run}_eeg_refTH6.fif"
+    out_ac  = RAW_PATH / f"{PARTICIPANT}_Run{run}_eeg_refAC.fif"
+
+    raw_refTH6.save(out_th6, overwrite=True)
+    raw_refAC.save(out_ac, overwrite=True)
+
+    print(f"Saved: {out_th6}")
+    print(f"Saved: {out_ac}")
