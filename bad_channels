@@ -1,0 +1,209 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Jan  8 15:34:14 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+r"""
+EEG + ESG/SPINAL — Inspección visual de canales ruidosos mediante PSD interactivo.
+Clic para marcar canales malos.
+
+Entrada:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\eeg_1000Hz_noStimArt\MULTICONS_*_Run*_NoStimArtifact*_1000Hz_aa.fif
+
+Salida:
+  C:\Users\navar\Desktop\sub-P01\sub-P01\bad_channels_from_psd_clicks.csv
+"""
+
+from pathlib import Path
+import re
+import csv
+
+import matplotlib.pyplot as plt
+import mne
+
+# ==========================
+# Paths (TU CASO REAL)
+# ==========================
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+IN_DIR = BASE / "eeg_1000Hz_noStimArt"
+OUTPUT_CSV = BASE / "bad_channels_from_psd_clicks.csv"
+
+# ==========================
+# Tus 62 canales EEG reales
+# ==========================
+EEG_CHANNELS = [
+    "Fp1", "Fz", "F3", "F7", "FT9", "FC5", "FC1", "C3", "T7", "TP9",
+    "CP5", "CP1", "Pz", "P3", "P7", "O1", "Oz", "O2", "P4", "P8",
+    "TP10", "CP6", "CP2", "C4", "T8", "FT10", "FC6", "FC2", "F4", "F8",
+    "Fp2", "AF7", "AF3", "AFz", "F1", "F5", "FT7", "FC3", "C1", "C5",
+    "TP7", "CP3", "P1", "P5", "PO7", "PO3", "POz", "PO4", "PO8", "P6",
+    "P2", "CPz", "CP4", "TP8", "C6", "C2", "FC4", "FT8", "F6", "AF8",
+    "AF4", "F2"
+]
+
+# ==========================
+# Tus canales ESG/SPINAL reales
+# ==========================
+ESG_CHANNELS = [
+    "Iz", "SC1", "SC6",
+    "S3", "S4", "S5", "S6", "S7", "S8", "S9",
+    "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19",
+    "AC", "TH6"
+]
+
+# ==========================
+# Helpers
+# ==========================
+def find_runs():
+    files = sorted(IN_DIR.glob("*Run*_NoStimArtifact*_1000Hz_aa.fif"))
+    if not files:
+        files = sorted(IN_DIR.glob("*NoStimArtifact*_1000Hz_aa.fif"))
+    return files
+
+def extract_run_number(fname: str) -> int:
+    m = re.search(r"Run\s*([0-9]+)", fname, flags=re.IGNORECASE)
+    return int(m.group(1)) if m else -1
+
+# ==========================
+# Interacción PSD
+# ==========================
+def interactive_psd_bad_selection(raw_obj, title, fmin=0.5, fmax=45, n_fft=2048):
+    """
+    raw_obj: Raw ya 'pickeado' a los canales a inspeccionar.
+    Clic en una curva para togglear 'bad'. Devuelve lista de canales marcados.
+    """
+    plt.ioff()
+
+    psd = raw_obj.compute_psd(
+        picks=None,      # ya viene pickeado
+        fmin=fmin,
+        fmax=fmax,
+        method="welch",
+        n_fft=n_fft,
+    )
+    psds, freqs = psd.get_data(return_freqs=True)
+
+    fig, ax = plt.subplots()
+    ax.set_title(title)
+    ax.set_xlabel("Frecuencia (Hz)")
+    ax.set_ylabel("Potencia (V^2/Hz)")
+    ax.set_xscale("log")
+    ax.set_xlim((fmin, fmax))
+
+    bad_channels = set()
+
+    # dibuja cada canal como una línea "pickable"
+    for ch_idx, ch_name in enumerate(psd.ch_names):
+        ax.plot(
+            freqs,
+            psds[ch_idx],
+            label=ch_name,
+            picker=True,
+            pickradius=5,
+        )
+
+    # leyenda: con muchos canales puede tapar; si molesta ponla fuera o quítala
+    ax.legend(loc="best", fontsize="small")
+
+    def toggle_bad(line):
+        ch_name = line.get_label()
+        if ch_name in bad_channels:
+            bad_channels.remove(ch_name)
+            line.set_linewidth(1.0)
+            line.set_alpha(1.0)
+        else:
+            bad_channels.add(ch_name)
+            line.set_linewidth(3.0)
+            line.set_alpha(0.3)
+
+    def on_pick(event):
+        if hasattr(event, "artist"):
+            toggle_bad(event.artist)
+            fig.canvas.draw_idle()
+
+    fig.canvas.mpl_connect("pick_event", on_pick)
+
+    print("   → Clic en las curvas para marcar canales malos.")
+    print("     Cierra la ventana cuando termines con este run.\n")
+
+    plt.show(block=True)
+    plt.close(fig)
+
+    return sorted(bad_channels)
+
+# ==========================
+# Pipeline principal
+# ==========================
+def psd_click_inspection():
+    rows = []
+
+    fif_files = find_runs()
+    if not fif_files:
+        print(f"No matching files in {IN_DIR}")
+        return
+
+    print(f"Encontrados {len(fif_files)} runs en {IN_DIR}")
+
+    for fif in fif_files:
+        print(f"\nLoading {fif.name}")
+        raw = mne.io.read_raw_fif(fif, preload=True, verbose="warning")
+
+        # -------- EEG --------
+        eeg_ch = [ch for ch in EEG_CHANNELS if ch in raw.ch_names]
+        if eeg_ch:
+            raw_eeg = raw.copy().pick(eeg_ch)
+            print("→ Mostrando PSD EEG...")
+            bad_eeg = interactive_psd_bad_selection(
+                raw_eeg,
+                title=f"PSD EEG — {fif.name} (clic para bads)",
+                fmin=0.5,
+                fmax=45,
+                n_fft=2048
+            )
+        else:
+            print("⚠ No EEG channels found in this file.")
+            bad_eeg = []
+
+        # -------- ESG/SPINAL --------
+        esg_ch = [ch for ch in ESG_CHANNELS if ch in raw.ch_names]
+        if esg_ch:
+            raw_esg = raw.copy().pick(esg_ch)
+            print("→ Mostrando PSD ESG/SPINAL...")
+            # para espinal suele interesar más alto; ajusta si quieres (p.ej. 5–800)
+            bad_esg = interactive_psd_bad_selection(
+                raw_esg,
+                title=f"PSD ESG/SPINAL — {fif.name} (clic para bads)",
+                fmin=0.5,
+                fmax=300,
+                n_fft=4096
+            )
+        else:
+            print("⚠ No ESG/SPINAL channels found in this file.")
+            bad_esg = []
+
+        run_num = extract_run_number(fif.name)
+
+        bad_eeg_str = ";".join(bad_eeg)
+        bad_esg_str = ";".join(bad_esg)
+
+        print(f"→ EEG bads: {bad_eeg_str if bad_eeg_str else '(ninguno)'}")
+        print(f"→ ESG bads: {bad_esg_str if bad_esg_str else '(ninguno)'}")
+
+        rows.append((PARTICIPANT, run_num, fif.name, bad_eeg_str, bad_esg_str))
+
+    if rows:
+        print(f"\nEscribiendo CSV → {OUTPUT_CSV}")
+        with OUTPUT_CSV.open("w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["subject", "run", "file", "bad_eeg_channels", "bad_esg_channels"])
+            w.writerows(rows)
+        print("Hecho.")
+    else:
+        print("\nNo se seleccionaron canales malos → no se crea CSV.")
+
+if __name__ == "__main__":
+    PARTICIPANT = "sub-P01"  # por si lo quieres fijo aquí
+    psd_click_inspection()
