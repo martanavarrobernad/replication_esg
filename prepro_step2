@@ -1,0 +1,584 @@
+
+#!/usr/bin/env python3
+"""
+Preprocessing pipeline for spinal and EEG data.
+
+This script prepares subject-specific configurations, defines EEG/spinal channel maps,
+sets up a montage, and includes a function to temporally realign (stretch) EEG/Spinal
+data based on specific evoked potentials (N9, N20, N25 components).
+
+The script is meant to be run from the command line, taking one participant ID as input.
+This script has been made compatible with IIT's HPC.
+
+Example:
+    $ python preprocess_spinal.py 204
+"""
+import mne
+from pathlib import Path
+import numpy as np
+
+PARTICIPANTS = ["sub-P01"]
+
+# Carpeta donde están los .vhdr (según tu ejemplo real)
+RAWPATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+
+# Prefijo fijo según tus nombres
+PREFIX = "MULTICONS_2025-12-16_"
+
+N_RUNS = 6  # HARD CODED
+
+for participant in PARTICIPANTS:
+    print(f"\nProcessing participant: {participant}")
+
+    for run in range(1, N_RUNS + 1):
+        vhdr_file = RAWPATH / f"{PREFIX}Run{run}.vhdr"
+        if not vhdr_file.exists():
+            raise FileNotFoundError(f"Missing file: {vhdr_file}")
+
+        print(f"  → Run {run}: {vhdr_file.name}")
+
+        # Load BrainVision data (EEG + spinal in the same file)
+        raw = mne.io.read_raw_brainvision(vhdr_file, preload=True, verbose=False)
+
+        # If your pipeline expects a separate raw for EEG processing:
+        raw2 = raw.copy()
+        
+# Channel definitions
+EEGCHANNELS = [
+    "Fp1","Fz","F3","F7","FT9","FC5","FC1","C3","T7","TP9",
+    "CP5","CP1","Pz","P3","P7","O1","Oz","O2","P4","P8",
+    "TP10","CP6","CP2","C4","T8","FT10","FC6","FC2","F4","F8",
+    "Fp2","AF7","AF3","AFz","F1","F5","FT7","FC3","C1","C5",
+    "TP7","CP3","P1","P5","PO7","PO3","POz","PO4","PO8","P6",
+    "P2","CPz","CP4","TP8","C6","C2","FC4","FT8","F6","AF8",
+    "AF4","F2"
+]
+
+SPINALCHANNELS = [
+    "Iz","SC1","SC6","S3","S4","S5","S6","S7","S8","S9",
+    "S11","S12","S13","S14","S15","S16","S17","S18","S19",
+    "AC","TH6"
+]
+
+# =============================================================================
+# Participant-specific settings
+# =============================================================================
+
+# Canales malos EEG por participante
+BADCHANNELS_EEG = {
+    "sub-P01": [
+        "AF7"
+    ],
+    # añade más sujetos aquí si hace falta
+}
+
+BADCHANNELS_SPINAL = {
+    "sub-P01": [
+    ],
+}
+
+TRESH_DICT = {
+    "sub-P01": 1.5e-4,  # ← EL VALOR QUE ACABAS DE CALCULAR
+}
+
+#Baseline and artifact windows (in seconds)
+BASELINE = (-0.100, -0.001)
+STIMARTIFACT = (-0.001, 0.005)
+    
+# =============================================================================
+# Event mapping with explicit stimulus positions
+# =============================================================================
+# Coding scheme:
+#   Left  standards:  111–116  (position 1–6)
+#   Left  deviant:    121
+#   Right standards: 211–216  (position 1–6)
+#   Right deviant:   221
+#
+# This preserves full positional information and can be grouped later if needed.
+# =============================================================================
+
+EVENT_DICT = {
+    # -------------------------------------------------------------------------
+    # LEFT — STANDARD (by position)
+    # -------------------------------------------------------------------------
+    "Stimulus/S 18": 111,  # Left, Standard, position 1
+    "Stimulus/S 19": 112,  # Left, Standard, position 2
+    "Stimulus/S 20": 113,  # Left, Standard, position 3
+    "Stimulus/S 21": 114,  # Left, Standard, position 4
+    "Stimulus/S 22": 115,  # Left, Standard, position 5
+    "Stimulus/S 23": 116,  # Left, Standard, position 6
+
+    # -------------------------------------------------------------------------
+    # LEFT — DEVIANT
+    # -------------------------------------------------------------------------
+    "Stimulus/S 25": 121,  # Left, Deviant
+
+    # -------------------------------------------------------------------------
+    # RIGHT — STANDARD (by position)
+    # -------------------------------------------------------------------------
+    "Stimulus/S 34": 211,  # Right, Standard, position 1
+    "Stimulus/S 35": 212,  # Right, Standard, position 2
+    "Stimulus/S 36": 213,  # Right, Standard, position 3
+    "Stimulus/S 37": 214,  # Right, Standard, position 4
+    "Stimulus/S 38": 215,  # Right, Standard, position 5
+    "Stimulus/S 39": 216,  # Right, Standard, position 6
+
+    # -------------------------------------------------------------------------
+    # RIGHT — DEVIANT
+    # -------------------------------------------------------------------------
+    "Stimulus/S 41": 221,  # Right, Deviant
+}
+
+# NOTE:
+# - "Stimulus/S 17" is intentionally NOT included (ignored stimulus)
+
+# =============================================================================
+# EEG (actiCAP / easycap GmbH, 64ch 10–10) + SPINAL montage (hardcoded)
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# 1) SPINAL montage hardcoded (your geometry)
+# Units: meters. x: left(-)/right(+). y: cranial(less negative)/caudal(more negative).
+# -------------------------------------------------------------------------
+spinal_ch_pos = {
+    # EEG tail / junction
+    "Iz":  [ 0.000, -0.105, 0.000],
+    "SC1": [ 0.000, -0.1125, 0.000],  # midway between Iz (-0.105) and S3 (-0.120)
+
+    # MIDLINE (x = 0.0) — 2 cm spacing
+    "S3":  [ 0.000, -0.120, 0.000],
+    "S6":  [ 0.000, -0.140, 0.000],
+    "SC6": [ 0.000, -0.160, 0.000],
+    "S14": [ 0.000, -0.180, 0.000],
+    "S18": [ 0.000, -0.200, 0.000],
+
+    # NEAR LATERALS (±1 cm), starting between S3 and S6 (1 cm below S3)
+    # Right
+    "S7":  [ 0.010, -0.130, 0.000],
+    "S11": [ 0.010, -0.150, 0.000],
+    "S15": [ 0.010, -0.170, 0.000],
+    "S19": [ 0.010, -0.190, 0.000],
+    # Left
+    "S5":  [-0.010, -0.130, 0.000],
+    "S9":  [-0.010, -0.150, 0.000],
+    "S13": [-0.010, -0.170, 0.000],
+    "S17": [-0.010, -0.190, 0.000],
+
+    # FAR LATERALS (±5 cm), same height as S6 and S14
+    "S4":  [-0.050, -0.140, 0.000],  # 5 cm left of S6
+    "S8":  [ 0.050, -0.140, 0.000],  # 5 cm right of S6
+    "S12": [-0.050, -0.180, 0.000],  # 5 cm left of S14
+    "S16": [ 0.050, -0.180, 0.000],  # 5 cm right of S14
+
+    # VERY LATERAL spinal electrodes (equivalent to EXG3/EXG6 in original)
+    "S23": [-0.090, -0.190, 0.000],  # left
+    "S24": [ 0.090, -0.190, 0.000],  # right
+
+    # References / auxiliary (visual placement based on your description)
+    # AC: ventral, above S8 (right), and 1 cm above the height of S3
+    "AC":  [ 0.050, -0.110, 0.000],
+    # TH6: midline, 10 cm below S18
+    "TH6": [ 0.000, -0.300, 0.000],
+}
+
+# Fix the position for visualization purposes (as in original: shift down by 1 cm)
+for ch in list(spinal_ch_pos.keys()):
+    spinal_ch_pos[ch] = [spinal_ch_pos[ch][0], spinal_ch_pos[ch][1] - 0.01, spinal_ch_pos[ch][2]]
+
+# -------------------------------------------------------------------------
+# 2) EEG montage (actiCAP 64ch, 10–10)
+# -------------------------------------------------------------------------
+eeg_montage = mne.channels.make_standard_montage("easycap-M1")
+eeg_ch_pos = eeg_montage.get_positions()["ch_pos"].copy()
+
+# -------------------------------------------------------------------------
+# 3) Merge EEG + spinal into one montage and apply to raw
+# -------------------------------------------------------------------------
+# Overwrite/add spinal positions into EEG positions
+eeg_ch_pos.update(spinal_ch_pos)
+
+FULL_MONTAGE = mne.channels.make_dig_montage(ch_pos=eeg_ch_pos, coord_frame="head")
+
+# =============================================================================
+# Channel mapping for left/right mirroring (EEG + spinal, adapted to your setup)
+# =============================================================================
+
+MAPPING = {
+    # ---------------------------------------------------------------------
+    # EEG (10–10 system)
+    # ---------------------------------------------------------------------
+    "Fp2": "Fp1", "Fp1": "Fp2",
+    "AF4": "AF3", "AF3": "AF4",
+    "F8":  "F7",  "F7":  "F8",
+    "F4":  "F3",  "F3":  "F4",
+    "FC6": "FC5", "FC5": "FC6",
+    "FC2": "FC1", "FC1": "FC2",
+    "T8":  "T7",  "T7":  "T8",
+    "C4":  "C3",  "C3":  "C4",
+    "CP6": "CP5", "CP5": "CP6",
+    "CP2": "CP1", "CP1": "CP2",
+    "P8":  "P7",  "P7":  "P8",
+    "P4":  "P3",  "P3":  "P4",
+    "PO4": "PO3", "PO3": "PO4",
+    "O2":  "O1",  "O1":  "O2",
+
+    # Midline EEG (identity)
+    "Fz": "Fz",
+    "Cz": "Cz",
+    "Pz": "Pz",
+    "Oz": "Oz",
+
+    # ---------------------------------------------------------------------
+    # SPINAL — near laterals (±1 cm)
+    # ---------------------------------------------------------------------
+    "S5":  "S7",  "S7":  "S5",
+    "S9":  "S11", "S11": "S9",
+    "S13": "S15", "S15": "S13",
+    "S17": "S19", "S19": "S17",
+
+    # ---------------------------------------------------------------------
+    # SPINAL — far laterals (±5 cm)
+    # ---------------------------------------------------------------------
+    "S4":  "S8",  "S8":  "S4",
+    "S12": "S16", "S16": "S12",
+
+    # ---------------------------------------------------------------------
+    # SPINAL — extreme laterals
+    # ---------------------------------------------------------------------
+    "S23": "S24", "S24": "S23",
+
+    # ---------------------------------------------------------------------
+    # SPINAL midline / non-symmetric (identity)
+    # ---------------------------------------------------------------------
+    "Iz":  "Iz",
+    "SC1": "SC1",
+    "S3":  "S3",
+    "S6":  "S6",
+    "SC6": "SC6",
+    "S14": "S14",
+    "S18": "S18",
+    "TH6": "TH6",
+
+    # AC intentionally NOT mirrored (ventral, unilateral)
+}
+
+# =============================================================================
+# Data alignment function
+# =============================================================================
+def stretcher(data):
+    """
+    Realign and stretch evoked EEG/spinal data around specific peaks (N9, N20, N25).
+
+    The function identifies characteristic latencies (N9 spinal, N20/N25 cortical),
+    shifts them to their expected positions, and then reconstructs a composite evoked
+    response by merging and time-warping EEG and spinal channels.
+
+    Parameters
+    ----------
+    data : mne.Epochs
+        The epochs object containing both EEG and spinal channels.
+
+    Returns
+    -------
+    newdata : mne.Evoked
+        An evoked object with EEG and spinal signals realigned and temporally corrected.
+    """
+
+    # Compute average (Evoked) across epochs
+    evoked = data.average()
+    times = evoked.times
+    sr = 5000.0
+    
+    # --- N20 correction (EEG) ---
+    xmin20, xmax20 = np.argwhere(times > 0.016).ravel()[0], np.argwhere(times > 0.022).ravel()[0]
+    po3 = evoked.get_data()[evoked.info['ch_names'].index('PO3')]
+    x20 = np.argmin(po3[xmin20:xmax20]) + xmin20  # Find N20 negative peak
+    real20 = np.abs(times - 0.020).argmin()       # Expected N20 latency
+    shift20 = (real20 - x20) * (1 / sr)
+
+    # --- N25 correction (EEG) ---
+    xmin25, xmax25 = np.argwhere(times > 0.020).ravel()[0], np.argwhere(times > 0.027).ravel()[0]
+    x25 = np.argmax(po3[xmin25:xmax25]) + xmin25  # Find N25 positive peak
+    real25 = np.abs(times - 0.025).argmin()       # Expected N25 latency
+    shift25 = (real25 - x25) * (1 / sr)
+
+    # Shift EEG channels (exclude spinal)
+    n20corrected = evoked.copy().shift_time(shift20, relative=True).drop_channels(SPINALCHANNELS)
+    n25corrected = evoked.copy().shift_time(shift25, relative=True).drop_channels(SPINALCHANNELS)
+
+    # --- N9 correction (Spinal) ---
+    xmin9, xmax9 = np.argwhere(times > 0.009).ravel()[0], np.argwhere(times > 0.013).ravel()[0]
+    erberb = evoked.get_data()[data.info['ch_names'].index('S24')] - evoked.get_data()[data.info['ch_names'].index('S23')]
+    x9 = np.argmin(erberb[xmin9:xmax9]) + xmin9
+    real9 = np.abs(times - 0.009).argmin()
+    shift9 = (real9 - x9) * (1 / sr)
+    n9corrected = evoked.copy().drop_channels(EEGCHANNELS)
+    n9corrected.shift_time(shift9)
+
+    # --- Align all signals to a common time window ---
+    tmin = max([x.times[0] for x in [n20corrected, n25corrected, n9corrected]])
+    tmax = min([x.times[-1] for x in [n20corrected, n25corrected, n9corrected]])
+    n20corrected.crop(tmin, tmax)
+    n25corrected.crop(tmin, tmax)
+    n9corrected.crop(tmin, tmax)
+
+    # --- Merge EEG signals ---
+    times = n20corrected.times
+    real20 = np.abs(times - 0.020).argmin()
+    real25 = np.abs(times - 0.025).argmin()
+
+    # Data before and after interpolation window
+    data20 = n20corrected.get_data()[:, :real20 + 1]
+    data25 = n25corrected.get_data()[:, real25:]
+
+    # Interpolate between N20 and N25
+    d1, d2 = np.array(n20corrected.get_data()[:, real20 + 1:real25]).shape
+    weights = np.array([[np.linspace(1, 0, d2)] * d1, [np.linspace(0, 1, d2)] * d1])
+    datamix = np.average(
+        [n20corrected.get_data()[:, real20 + 1:real25],
+         n25corrected.get_data()[:, real20 + 1:real25]],
+        axis=0, weights=weights
+    )
+
+    # Reconstruct full EEG segment
+    newdata = np.concatenate([data20, datamix, data25], axis=1)
+
+    # Add spinal data back
+    newdataspinal = n9corrected.get_data()
+    newdata = np.concatenate([newdataspinal, newdata])
+
+    # Build final MNE Evoked object
+    newdata = mne.EvokedArray(newdata, evoked.info, tmin=times[0])
+
+    return newdata
+
+# =============================================================================
+# MAIN PREPROCESSING LOOP
+# =============================================================================
+# Loop through each participant ID provided via command-line argument. 
+# Using a single participant allows for  concurrent execution in parallel.
+for participant in PARTICIPANTS:
+    
+    # Skip participants missing the reference channel 'S64' (used for spinal rereferencing)
+    if 'TH6' not in BADCHANNELS_SPINAL[participant]:
+        
+        # ---------------------------------------------------------------------
+        # SPINAL DATA PREPROCESSING
+        # ---------------------------------------------------------------------
+        
+        # Load participant's raw data (contains both EEG and spinal)
+        raw = mne.io.read_raw_brainvision(vhdr_file, preload=True, verbose=False)
+        sr = 5000.0
+        
+        # Mark bad spinal channels for this participant
+        raw.info['bads'].extend(BADCHANNELS_SPINAL[participant])
+        
+        # Extract the indexes of spinal channels from the raw data
+        spinalindexes = [raw.info['ch_names'].index(x) for x in SPINALCHANNELS]
+        
+        # Set the spinal rereference to S64 (the most caudal electrode)
+        raw = raw.set_eeg_reference(ref_channels=['TH6'])
+        
+        # --- EVENT DETECTION ---
+        # Extract trigger events (stimulus markers)
+        events, event_id = mne.events_from_annotations(raw)
+
+        inv = {v: k for k, v in event_id.items()}  # code -> description
+        
+        events_mapped = []
+        for s, _, code in events:
+            desc = inv.get(code)
+            if desc in EVENT_DICT:
+                events_mapped.append([s, 0, EVENT_DICT[desc]])
+                
+        events = np.array(events_mapped, dtype=int)       
+        events_orig = np.array(events, dtype=int).copy()
+
+        # --- INITIAL EPOCHING (spinal only, no baseline correction yet) ---
+        epochs = mne.Epochs(
+            raw, events, tmin=-0.1, tmax=0.200, detrend=0,
+            baseline=None, proj=True, preload=True, picks=spinalindexes
+        )
+        
+        evoked = epochs.average()  # Just for visualization if needed
+        
+        # ---------------------------------------------------------------------
+        # EVENT REFINEMENT BASED ON STIMULUS ARTIFACT
+        # ---------------------------------------------------------------------
+        # Precisely align events by detecting small deflections around 0 ms (solves USB triggering jitter)
+        
+        events = []  # reset list for refined events
+        times = epochs.times  # time base matching epochs
+        xmin, xmax = np.argwhere(times > -0.003).ravel()[0], np.argwhere(times > 0.003).ravel()[0]
+        
+        for i in range(len(epochs)):
+            y = epochs[i].get_data()[0][0]  # get signal for first spinal channel
+            treshold = max(abs(np.diff(y[:xmin]))) * 1.5  # dynamic threshold for artifact detection
+            
+            # Skip epochs that are too flat (likely bad)
+            if max(abs(y[:xmin])) < 0.005:
+                try:
+                    # Find first large derivative (stim onset)
+                    x = np.where((abs(np.diff(y[xmin:xmax])) > treshold) == True)[0][0] + xmin
+                    
+                    # Recenter event timing to detected peak
+                    zero = np.abs(times).argmin()
+                    event = epochs[i].events[0]
+                    event[0] += x - zero  # adjust event latency
+                    events.append(event)
+                except:
+                    # If no artifact is found, skip
+                    pass
+        
+        # ---------------------------------------------------------------------
+        # SPINAL DATA CLEANING & FILTERING
+        # ---------------------------------------------------------------------
+        
+        # Remove residual stimulation artifact by linear interpolation
+        events = np.array(events, dtype=int)
+        if events.size == 0:
+            print("⚠ No refined events found; falling back to original events for fix_stim_artifact.")
+            events = events_orig
+
+        mne.preprocessing.fix_stim_artifact(
+            raw, events=events,
+            tmin=STIMARTIFACT[0], tmax=STIMARTIFACT[1],
+            mode='linear'
+        )
+        
+        # Band-pass filter spinal channels (50–800 Hz typical for spinal potentials)
+        raw.filter(50, 800, n_jobs=-1)
+        
+        # Recreate epochs with detrending, baseline, and artifact rejection
+        epochs = mne.Epochs(
+            raw, events, tmin=-0.1, tmax=0.200, detrend=1,
+            baseline=BASELINE, proj=True, preload=True,
+            picks=spinalindexes, reject={'eeg': TRESH_DICT[participant]}
+        )
+        
+        data = epochs.get_data()  # Extract cleaned spinal data
+        ids = epochs.selection     # Keep only good epoch indices
+        eventsSelected = np.array(events)[ids]  # Filter events accordingly
+        
+        # ---------------------------------------------------------------------
+        # EEG DATA PREPROCESSING
+        # ---------------------------------------------------------------------
+        
+        # Reload raw data
+        raw2 = raw = mne.io.read_raw_brainvision(vhdr_file, preload=True, verbose=False).load_data()
+        sr = 5000.0
+        
+        # Mark bad EEG channels
+        raw2.info['bads'].extend(BADCHANNELS_EEG[participant])
+        
+        # Extract EEG channel indices
+        eegindexes = [raw2.info['ch_names'].index(x) for x in EEGCHANNELS]
+        
+        # Set EEG reference
+        raw2 = raw2.set_eeg_reference(['Fz'])
+        
+        # Remove stimulation artifact from EEG as well
+        mne.preprocessing.fix_stim_artifact(
+            raw2, events=eventsSelected,
+            tmin=STIMARTIFACT[0], tmax=STIMARTIFACT[1],
+            mode='linear'
+        )
+        
+        # Band-pass filter EEG channels (50–1000 Hz)
+        raw2.filter(50, 800, n_jobs=-1)
+        
+        # Epoch EEG data around the same events
+        epochs2 = mne.Epochs(
+            raw2, eventsSelected, tmin=-0.1, tmax=0.200, detrend=1,
+            baseline=BASELINE, proj=True, preload=False, picks=eegindexes
+        )
+        
+        data2 = epochs2.get_data()
+        
+        # ---------------------------------------------------------------------
+        # COMBINE SPINAL + EEG INTO ONE DATA STRUCTURE
+        # ---------------------------------------------------------------------
+        
+        data3 = np.hstack([data, data2])  # concatenate along channel axis
+        info = mne.create_info(SPINALCHANNELS + EEGCHANNELS, sr, ch_types='eeg')
+        
+        combined = mne.EpochsArray(data3, info, eventsSelected, tmin=-0.1)
+        combined.set_montage(FULL_MONTAGE, on_missing='ignore')
+        
+        # Propagate bad channels to the combined dataset (robust + no duplicates)
+        combined.info['bads'].extend(BADCHANNELS_EEG.get(participant, []))
+        combined.info['bads'].extend(BADCHANNELS_SPINAL.get(participant, []))
+        combined.info['bads'] = sorted(
+            {ch for ch in combined.info['bads'] if ch in combined.ch_names},
+            key=combined.ch_names.index
+        )
+        
+        LEFT_STANDARD_IDS  = [111, 112, 113, 114, 115, 116]
+        LEFT_DEVIANT_IDS   = [121]
+        RIGHT_STANDARD_IDS = [211, 212, 213, 214, 215, 216]
+        RIGHT_DEVIANT_IDS  = [221]
+        
+        # Build LEFT/RIGHT "hand" sets for alignment (equivalent to original 11/12 and 21/22)
+        epochsLeft  = combined[[str(x) for x in (LEFT_STANDARD_IDS + LEFT_DEVIANT_IDS)]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        epochsRight = combined[[str(x) for x in (RIGHT_STANDARD_IDS + RIGHT_DEVIANT_IDS)]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        
+        # --- LEFT conditions (optional comparisons) ---
+        epochs_left_standard = combined[[str(x) for x in LEFT_STANDARD_IDS]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        epochs_left_deviant  = combined[[str(x) for x in LEFT_DEVIANT_IDS]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        # --- RIGHT conditions (optional comparisons) ---
+        epochs_right_standard = combined[[str(x) for x in RIGHT_STANDARD_IDS]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        epochs_right_deviant  = combined[[str(x) for x in RIGHT_DEVIANT_IDS]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        
+        # --- GLOBAL (collapsing sides) ---
+        epochs_standard_all = combined[[str(x) for x in (LEFT_STANDARD_IDS + RIGHT_STANDARD_IDS)]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        epochs_deviant_all  = combined[[str(x) for x in (LEFT_DEVIANT_IDS + RIGHT_DEVIANT_IDS)]].set_montage(FULL_MONTAGE, on_missing="ignore")
+        
+        # (optional) Evoked objects for quick checking
+        ev_left_std  = epochs_left_standard.average()
+        ev_left_dev  = epochs_left_deviant.average()
+        ev_right_std = epochs_right_standard.average()
+        ev_right_dev = epochs_right_deviant.average()
+        ev_std_all   = epochs_standard_all.average()
+        ev_dev_all   = epochs_deviant_all.average()
+
+        # ---------------------------------------------------------------------
+        # Mirror RIGHT -> LEFT space using MAPPING (like original)
+        # (Do this for the "right-hand" set that will be aligned/combined)
+        # ---------------------------------------------------------------------
+        bads = [MAPPING.get(ch, ch) for ch in epochsRight.info.get('bads', [])]
+        epochsRight = epochsRight.rename_channels(MAPPING)
+        epochsRight.info['bads'] = bads
+        epochsRight.set_montage(FULL_MONTAGE, on_missing="ignore")
+        
+        # ---------------------------------------------------------------------
+        # ALIGN AND STRETCH EEG/SPINAL DATA USING N9/N20/N25 CORRECTION
+        # ---------------------------------------------------------------------
+        # NOTE: your stretcher() returns only an Evoked (not (evoked, epochs)).
+        # We therefore align and save Evoked objects here (same idea as original).
+        
+        newevokeds = []
+        for source in [epochsLeft, epochsRight]:
+            evoked = stretcher(source)
+            newevokeds.append(evoked)
+        
+        # Determine overlapping time windows for both hands
+        tmins = [x.times[0] for x in newevokeds]
+        tmaxs = [x.times[-1] for x in newevokeds]
+        
+        for evoked in newevokeds:
+            evoked.crop(max(tmins), min(tmaxs))
+        
+        # Save aligned evokeds (one per side)
+        hand = ['left', 'right']
+        for i, evoked in enumerate(newevokeds):
+            evoked.save(
+                str(RAWPATH + participant + '_' + hand[i] + '-ave.fif'),
+                overwrite=True
+            )
+    
+    # -------------------------------------------------------------------------
+    # If reference channel 'TH6' is missing, skip this participant
+    # -------------------------------------------------------------------------
+    else:
+        PARTICIPANTS.pop(PARTICIPANTS.index(participant))
+  
