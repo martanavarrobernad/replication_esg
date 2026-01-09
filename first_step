@@ -1,8 +1,13 @@
-#cambiar para trabajar sobre datos re-referenciados
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Jan  9 11:30:54 2026
+
+@author: navar
+"""
+
 # -*- coding: utf-8 -*-
 """
 Created on Thu Jan  8 12:31:22 2026
-
 @author: navar
 """
 #!/usr/bin/env python3
@@ -20,6 +25,48 @@ RAW_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
 PARTICIPANTS = ["sub-P01"]
 RUNS = range(1, 7)  # Run1–Run6
 
+# Tus canales extra (para montage)
+SPINAL_EXTRA = {
+    # EEG tail / junction
+    "Iz":  [ 0.000, -0.105, 0.000],
+    "SC1": [ 0.000, -0.1125, 0.000],
+
+    # MIDLINE
+    "S3":  [ 0.000, -0.120, 0.000],
+    "S6":  [ 0.000, -0.140, 0.000],
+    "SC6": [ 0.000, -0.160, 0.000],
+    "S14": [ 0.000, -0.180, 0.000],
+    "S18": [ 0.000, -0.200, 0.000],
+
+    # NEAR LATERALS (±1cm)
+    "S7":  [ 0.010, -0.130, 0.000],
+    "S11": [ 0.010, -0.150, 0.000],
+    "S15": [ 0.010, -0.170, 0.000],
+    "S19": [ 0.010, -0.190, 0.000],
+    "S5":  [-0.010, -0.130, 0.000],
+    "S9":  [-0.010, -0.150, 0.000],
+    "S13": [-0.010, -0.170, 0.000],
+    "S17": [-0.010, -0.190, 0.000],
+
+    # FAR LATERALS (±5cm)
+    "S4":  [-0.050, -0.140, 0.000],
+    "S8":  [ 0.050, -0.140, 0.000],
+    "S12": [-0.050, -0.180, 0.000],
+    "S16": [ 0.050, -0.180, 0.000],
+
+    # References / auxiliary (per tu descripción)
+    "AC":  [ 0.050, -0.110, 0.000],
+    "TH6": [ 0.000, -0.300, 0.000],
+
+    # ENG (equivalentes a tus “S23/S24”)
+    "ENG_ERB":     [-0.090, -0.190, 0.000],  # izquierda
+    "ENG_ERB_REF": [ 0.090, -0.190, 0.000],  # derecha
+}
+
+# shift down by 1 cm for visualization purposes (como el paper)
+for ch in list(SPINAL_EXTRA.keys()):
+    SPINAL_EXTRA[ch] = [SPINAL_EXTRA[ch][0], SPINAL_EXTRA[ch][1] - 0.01, SPINAL_EXTRA[ch][2]]
+
 # =============================================================================
 # MAIN PROCESSING LOOP
 # =============================================================================
@@ -34,14 +81,17 @@ for participant in PARTICIPANTS:
         output_file = RAW_PATH / f"{participant}_Run{run}_eeg.fif"
 
         raw = mne.io.read_raw_brainvision(raw_file, preload=False, verbose=False)
+
+        # Re-muestreo a 5000 Hz (como querías)
         raw.resample(5000, npad="auto")
-        sr = raw.info['sfreq']
+        sr = float(raw.info["sfreq"])
 
         # ---------------------------------------------------------------------
         # EVENT EXTRACTION AND CLEANING
         # ---------------------------------------------------------------------
         events, event_id = mne.events_from_annotations(raw)
 
+        # Mantengo EXACTAMENTE tu recorte de eventos por bloques
         events = np.concatenate([
             events[x + 20: x + 500]
             for x in range(0, 3000, 500)
@@ -59,38 +109,32 @@ for participant in PARTICIPANTS:
             for x in np.transpose(events_ecg)[0]
         ]
         ecg_samples = pd.Series(np.concatenate(ecg_windows))
-        
+
         clean_events = [e for e in events if e[0] not in ecg_samples.values]
         clean_events = np.array(clean_events)
+
         inv_event_id = {v: k for k, v in event_id.items()}
         new_annot = mne.annotations_from_events(
             clean_events,
             sfreq=raw.info["sfreq"],
             event_desc=inv_event_id
         )
-
         raw.set_annotations(new_annot)
 
         # ---------------------------------------------------------------------
-        # SETUP ELECTRODE MONTAGE (FIEL A ACTICAP / BRAINVISION)
+        # SETUP ELECTRODE MONTAGE (ACTICAP + tus espinales/ENG)
         # ---------------------------------------------------------------------
-        # EEG: coordenadas estándar EasyCap (base actiCAP, sistema 10–10)
         std = mne.channels.make_standard_montage("easycap-M1")
         std_pos = std.get_positions()["ch_pos"]
 
-        # Mismo estilo que tu código original
         montage_dict = {ch: pos.tolist() for ch, pos in std_pos.items()}
 
-        # Espinales: NO tienen coordenadas → NO se añaden
-        # Se mantiene tu bucle original (no hará nada, y eso es correcto)
-        for i in range(1, 65):
-            if i == 32:  # skip missing S32
-                continue
-            key = f"S{i}"
-            if key in montage_dict:
-                montage_dict[key][1] -= 0.01  # slight posterior adjustment
+        # Añadir posiciones hardcodeadas para tus canales espinales/ENG (si existen en raw)
+        for ch, pos in SPINAL_EXTRA.items():
+            if ch in raw.ch_names:
+                montage_dict[ch] = pos
 
-        montage = mne.channels.make_dig_montage(montage_dict)
+        montage = mne.channels.make_dig_montage(montage_dict, coord_frame="head")
         raw.set_montage(montage, on_missing='ignore')
 
         # ---------------------------------------------------------------------
