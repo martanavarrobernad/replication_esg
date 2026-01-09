@@ -1,4 +1,4 @@
-#last error: ValueError: Invalid channel name(s) {'S23', 'Cz', 'S24'} are not present in info
+
 #!/usr/bin/env python3
 """
 Preprocessing pipeline for spinal and EEG data.
@@ -6,12 +6,6 @@ Preprocessing pipeline for spinal and EEG data.
 This script prepares subject-specific configurations, defines EEG/spinal channel maps,
 sets up a montage, and includes a function to temporally realign (stretch) EEG/Spinal
 data based on specific evoked potentials (N9, N20, N25 components).
-
-The script is meant to be run from the command line, taking one participant ID as input.
-This script has been made compatible with IIT's HPC.
-
-Example:
-    $ python preprocess_spinal.py 204
 """
 import mne
 from pathlib import Path
@@ -57,7 +51,7 @@ EEGCHANNELS = [
 SPINALCHANNELS = [
     "Iz","SC1","SC6","S3","S4","S5","S6","S7","S8","S9",
     "S11","S12","S13","S14","S15","S16","S17","S18","S19",
-    "AC","TH6"
+    "AC","TH6","ENG_ERB_REF","ENG_ERB"
 ]
 
 # =============================================================================
@@ -171,8 +165,8 @@ spinal_ch_pos = {
     "S16": [ 0.050, -0.180, 0.000],  # 5 cm right of S14
 
     # VERY LATERAL spinal electrodes (equivalent to EXG3/EXG6 in original)
-    "S23": [-0.090, -0.190, 0.000],  # left
-    "S24": [ 0.090, -0.190, 0.000],  # right
+    "ENG_ERB": [-0.090, -0.190, 0.000],  # left
+    "ENG_ERB_REF": [ 0.090, -0.190, 0.000],  # right
 
     # References / auxiliary (visual placement based on your description)
     # AC: ventral, above S8 (right), and 1 cm above the height of S3
@@ -224,7 +218,6 @@ MAPPING = {
 
     # Midline EEG (identity)
     "Fz": "Fz",
-    "Cz": "Cz",
     "Pz": "Pz",
     "Oz": "Oz",
 
@@ -245,7 +238,7 @@ MAPPING = {
     # ---------------------------------------------------------------------
     # SPINAL — extreme laterals
     # ---------------------------------------------------------------------
-    "S23": "S24", "S24": "S23",
+    "ENG_ERB": "ENG_ERB_REF", "ENG_ERB_REF": "ENG_ERB",
 
     # ---------------------------------------------------------------------
     # SPINAL midline / non-symmetric (identity)
@@ -308,7 +301,7 @@ def stretcher(data):
 
     # --- N9 correction (Spinal) ---
     xmin9, xmax9 = np.argwhere(times > 0.009).ravel()[0], np.argwhere(times > 0.013).ravel()[0]
-    erberb = evoked.get_data()[data.info['ch_names'].index('S24')] - evoked.get_data()[data.info['ch_names'].index('S23')]
+    erberb = evoked.get_data()[data.info['ch_names'].index('ENG_ERB_REF')] - evoked.get_data()[data.info['ch_names'].index('ENG_ERB')]
     x9 = np.argmin(erberb[xmin9:xmax9]) + xmin9
     real9 = np.abs(times - 0.009).argmin()
     shift9 = (real9 - x9) * (1 / sr)
@@ -572,7 +565,7 @@ for participant in PARTICIPANTS:
         hand = ['left', 'right']
         for i, evoked in enumerate(newevokeds):
             evoked.save(
-                str(RAWPATH + participant + '_' + hand[i] + '-ave.fif'),
+                (RAWPATH / f"{participant}_{hand[i]}-ave.fif"),
                 overwrite=True
             )
     
