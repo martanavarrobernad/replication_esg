@@ -1,0 +1,294 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 12 16:38:18 2026
+
+@author: navar
+"""
+
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------
+# INPUT
+# -----------------------
+epochs_path = r"C:\Users\navar\Desktop\sub-P01\sub-P01\sub-P01_epochs_EEG_badEEG_rejected-epo.fif"
+
+EEGCHANNELS = [
+    "Fp1","Fz","F3","F7","FT9","FC5","FC1","C3","T7","TP9",
+    "CP5","CP1","Pz","P3","P7","O1","Oz","O2","P4","P8",
+    "TP10","CP6","CP2","C4","T8","FT10","FC6","FC2","F4","F8",
+    "Fp2","AF7","AF3","AFz","F1","F5","FT7","FC3","C1","C5",
+    "TP7","CP3","P1","P5","PO7","PO3","POz","PO4","PO8","P6",
+    "P2","CPz","CP4","TP8","C6","C2","FC4","FT8","F6","AF8",
+    "AF4","F2"
+]
+
+MMN_CHS = ["Fz", "FCz", "Cz", "FC1", "FC2"]
+P3_CHS  = ["Pz", "CPz", "POz", "P1", "P2"]
+
+MMN_WIN = (0.150, 0.250)
+P3_WIN  = (0.280, 0.500)
+
+COND_A = ["Stimulus/S 25", "Stimulus/S 41"]
+COND_B = ["Stimulus/S 21", "Stimulus/S 22", "Stimulus/S 37", "Stimulus/S 38"]
+
+# -----------------------
+# HELPERS
+# -----------------------
+def existing_chs(inst, ch_list):
+    """Devuelve solo los canales de ch_list que existan en inst."""
+    present = set(inst.ch_names)
+    return [ch for ch in ch_list if ch in present]
+
+def plot_overlay(evoked_a, evoked_b, picks, title, win=None):
+    """Superpone dos evoked en los canales picks."""
+    fig = mne.viz.plot_compare_evokeds(
+        {"COND_A (S25+S41)": evoked_a, "COND_B (S21+S22+S37+S38)": evoked_b},
+        picks=picks,
+        combine=None,     # muestra cada canal
+        show=False
+    )
+    # mne devuelve una lista/fig según versión; forzamos título con matplotlib
+    plt.suptitle(title, y=0.98)
+
+    if win is not None:
+        # sombreado de ventana temporal en todos los ejes de la figura
+        axes = fig.axes if hasattr(fig, "axes") else []
+        for ax in axes:
+            ax.axvspan(win[0], win[1], alpha=0.15)
+    plt.show()
+
+def plot_roi_mean(evoked_a, evoked_b, picks, title, win=None):
+    """Grafica el promedio (ROI) de canales picks como una sola onda por condición."""
+    # copiar y quedarnos con picks
+    ea = evoked_a.copy().pick(picks)
+    eb = evoked_b.copy().pick(picks)
+
+    roi_a = ea.data.mean(axis=0)  # promedio canales
+    roi_b = eb.data.mean(axis=0)
+
+    t = ea.times
+
+    plt.figure()
+    plt.plot(t, roi_a * 1e6, label="COND_A (S25+S41)")  # a microvoltios
+    plt.plot(t, roi_b * 1e6, label="COND_B (S21+S22+S37+S38)")
+    plt.axhline(0, linewidth=1)
+    plt.xlabel("Tiempo (s)")
+    plt.ylabel("Amplitud (µV)")
+    plt.title(title)
+    if win is not None:
+        plt.axvspan(win[0], win[1], alpha=0.15)
+    plt.legend()
+    plt.show()
+
+# -----------------------
+# LOAD + PREP
+# -----------------------
+epochs = mne.read_epochs(epochs_path, preload=True)
+
+# quedarnos solo con tus EEGCHANNELS (si existen)
+picks_eeg = existing_chs(epochs, EEGCHANNELS)
+epochs = epochs.copy().pick(picks_eeg)
+
+# ✅ AQUÍ: filtro pasa-bajos 30 Hz
+epochs.filter(l_freq=None, h_freq=30., fir_design="firwin")
+
+# baseline (ajústalo si ya venía aplicado o si tu paradigma usa otro)
+# si ya está baselineado y no quieres tocarlo, comenta la línea siguiente
+epochs.apply_baseline((None, 0))
+
+print("Event_id disponibles (ejemplo):")
+print(list(epochs.event_id.keys())[:20])
+
+# -----------------------
+# BUILD EVOKEDS (promedios)
+# -----------------------
+# Selección por nombre de evento (lista): epochs[["Stimulus/S 25","Stimulus/S 41"]]
+evoked_A = epochs[COND_A].average()
+evoked_B = epochs[COND_B].average()
+
+evoked_A.data = np.abs(evoked_A.data)
+evoked_B.data = np.abs(evoked_B.data)
+
+# -----------------------
+# PLOTS: MMN y P3 (sin resta, solo superposición)
+# -----------------------
+mmn_picks = existing_chs(evoked_A, MMN_CHS)
+p3_picks  = existing_chs(evoked_A, P3_CHS)
+
+print("Canales MMN usados:", mmn_picks)
+print("Canales P3 usados:", p3_picks)
+
+# 1) Superposición por canal (varias trazas)
+if len(mmn_picks) > 0:
+    plot_overlay(evoked_A, evoked_B, mmn_picks, "ERP superpuesto - ROI MMN (por canal)", win=MMN_WIN)
+    plot_roi_mean(evoked_A, evoked_B, mmn_picks, "ERP superpuesto - ROI MMN (promedio de canales)", win=MMN_WIN)
+
+if len(p3_picks) > 0:
+    plot_overlay(evoked_A, evoked_B, p3_picks, "ERP superpuesto - ROI P3 (por canal)", win=P3_WIN)
+    plot_roi_mean(evoked_A, evoked_B, p3_picks, "ERP superpuesto - ROI P3 (promedio de canales)", win=P3_WIN)
+
+# -----------------------
+# EXTRA (opcional): topomapas en el pico/ventana
+# -----------------------
+# Si tienes montaje/posiciones, esto ayuda mucho:
+# epochs.set_montage("standard_1020", match_case=False)
+
+# Topomap por tiempo medio de la ventana (uno por condición)
+# (Solo si quieres y si tienes montaje)
+# for (name, evk, win) in [("MMN", evoked_A, MMN_WIN), ("P3", evoked_A, P3_WIN)]:
+#     t_mid = np.mean(win)
+#     evk.plot_topomap(times=[t_mid], title=f"Topomap {name} COND_A @ {t_mid:.3f}s")
+#     evoked_B.plot_topomap(times=[t_mid], title=f"Topomap {name} COND_B @ {t_mid:.3f}s")
+
+# =============================================================================
+# %%
+
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------
+# INPUT
+# -----------------------
+epochs_path = r"C:\Users\navar\Desktop\sub-P01\sub-P01\sub-P01_epochs_EEG_badEEG_rejected-epo.fif"
+
+COND_A = ["Stimulus/S 25", "Stimulus/S 41"]  # 121 + 221
+COND_B = ["Stimulus/S 21", "Stimulus/S 22", "Stimulus/S 37", "Stimulus/S 38"]  # 114 + 115 + 214 + 215
+
+MMN_CH = "Fz"
+P3_CH  = "Pz"
+
+MMN_WIN = (0.150, 0.250)
+P3_WIN  = (0.280, 0.500)
+
+# -----------------------
+# LOAD
+# -----------------------
+epochs = mne.read_epochs(epochs_path, preload=True)
+
+epochs.filter(l_freq=None, h_freq=30., fir_design="firwin")
+epochs.apply_baseline((None, 0))
+
+
+# Asegurar que existen los canales que quieres
+for ch in [MMN_CH, P3_CH]:
+    if ch not in epochs.ch_names:
+        raise RuntimeError(f"No encuentro el canal {ch} en tus datos. Canales disponibles: {epochs.ch_names[:10]}...")
+
+# -----------------------
+# PREPROCESADO para ERP (visualización típica)
+# -----------------------
+
+# Low-pass para ERP "típico"
+epochs.filter(l_freq=None, h_freq=30., fir_design="firwin")
+
+# Baseline
+epochs.apply_baseline((None, 0))
+
+# -----------------------
+# EVOKEDS (promedios)
+# -----------------------
+evoked_A = epochs[COND_A].average()
+evoked_B = epochs[COND_B].average()
+
+# -----------------------
+# FUNCIÓN PARA PLOT DE 1 CANAL
+# -----------------------
+def plot_one_channel(evA, evB, ch_name, title, win=None):
+    evA_ch = evA.copy().pick([ch_name])
+    evB_ch = evB.copy().pick([ch_name])
+
+    t = evA_ch.times
+    yA = evA_ch.data[0] * 1e6  # µV
+    yB = evB_ch.data[0] * 1e6  # µV
+
+    plt.figure()
+    plt.plot(t, yA, label="COND_A (S25+S41)")
+    plt.plot(t, yB, label="COND_B (S21+S22+S37+S38)")
+    plt.axvline(0, linestyle="--", linewidth=1)
+    plt.axhline(0, linewidth=1)
+    if win is not None:
+        plt.axvspan(win[0], win[1], alpha=0.15)
+    plt.xlabel("Tiempo (s)")
+    plt.ylabel("Amplitud (µV)")
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
+# -----------------------
+# PLOTS
+# -----------------------
+plot_one_channel(evoked_A, evoked_B, MMN_CH, f"ERP en {MMN_CH} (MMN) - superpuesto", win=MMN_WIN)
+plot_one_channel(evoked_A, evoked_B, P3_CH,  f"ERP en {P3_CH} (P3) - superpuesto",  win=P3_WIN)
+
+# %%
+
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+
+# -----------------------
+# INPUT
+# -----------------------
+epochs_path = r"C:\Users\navar\Desktop\sub-P01\sub-P01\sub-P01_epochs_EEG_badEEG_rejected-epo.fif"
+
+COND_A = ["Stimulus/S 25", "Stimulus/S 41"]
+COND_B = ["Stimulus/S 21", "Stimulus/S 22", "Stimulus/S 37", "Stimulus/S 38"]
+
+MMN_CH = "Fz"
+P3_CH  = "Pz"
+
+MMN_WIN = (0.150, 0.250)
+P3_WIN  = (0.280, 0.500)
+
+# -----------------------
+# LOAD
+# -----------------------
+epochs = mne.read_epochs(epochs_path, preload=True)
+
+for ch in [MMN_CH, P3_CH]:
+    if ch not in epochs.ch_names:
+        raise RuntimeError(f"No encuentro el canal {ch} en tus datos.")
+
+# -----------------------
+# PREPROCESADO ERP
+# -----------------------
+epochs.filter(l_freq=None, h_freq=30., fir_design="firwin")
+epochs.apply_baseline((None, 0))
+
+# -----------------------
+# EVOKEDS + RESTA (A - B)
+# -----------------------
+evoked_A = epochs[COND_A].average()
+evoked_B = epochs[COND_B].average()
+
+diff = mne.combine_evoked([evoked_A, evoked_B], weights=[1, -1])  # A - B
+
+# -----------------------
+# PLOT función 1 canal
+# -----------------------
+def plot_diff_one_channel(diff_evoked, ch_name, title, win=None):
+    d = diff_evoked.copy().pick([ch_name])
+    t = d.times
+    y = d.data[0] * 1e6  # a µV
+
+    plt.figure()
+    plt.plot(t, y, label="COND_A - COND_B")
+    plt.axvline(0, linestyle="--", linewidth=1)
+    plt.axhline(0, linewidth=1)
+    if win is not None:
+        plt.axvspan(win[0], win[1], alpha=0.15)
+    plt.xlabel("Tiempo (s)")
+    plt.ylabel("Amplitud (µV)")
+    plt.title(title)
+    plt.legend()
+    plt.show()
+
+# -----------------------
+# FIGURAS: MMN y P3 (resta)
+# -----------------------
+plot_diff_one_channel(diff, MMN_CH, f"MMN (A - B) en {MMN_CH}", win=MMN_WIN)
+plot_diff_one_channel(diff, P3_CH,  f"P3 (A - B) en {P3_CH}",  win=P3_WIN)
+
