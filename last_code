@@ -1,0 +1,512 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 12 18:30:56 2026
+
+@author: navar
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+PIPELINE ÚNICO (como antes, sin Step0) — sub-P01 Run1
+
+Orden:
+1) Load .vhdr -> resample
+2) Tipos de canal + montage
+3) Eventos (stim si existe, si no annotations)
+4) ECG gating de eventos (±150 ms)  [APLICA A TODOS]
+5) GUI opcional: marcar bad_eeg* (y aplicar gating a TODOS)
+6) Jitter correction por artefacto (canal MISC)
+7) fix_stim_artifact (−1 ms a +5 ms) en continuo
+8) Re-ref MISC a TH6 (X := X - TH6)
+9) Filtrado MISC 50–800
+10) ICA SOLO EEG (fit con HP=1) + apply
+11) Filtrado EEG 1–40
+12) Epochs EEG y MISC con mismos events
+13) Merge EEG+MISC a un solo EpochsArray
+
+Salida:
+- sub-P01_cleaned_raw_resampled_ica.fif
+- sub-P01_epochs_EEG-epo.fif
+- sub-P01_epochs_MISC-epo.fif
+- sub-P01_Run1_epochs_EEG+MISC_combined-epo.fif
+- sub-P01_events_final.npy
+- sub-P01_ica_info.json
+"""
+
+from pathlib import Path
+import json
+import numpy as np
+import mne
+from mne.preprocessing import ICA
+
+# ============================================================
+# CONFIG
+# ============================================================
+BASE = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+PARTICIPANT = "sub-P01"
+RUN = 1
+
+VHDR_PATH = BASE / f"MULTICONS_2025-12-16_Run{RUN}.vhdr"
+
+RAW_CLEAN_FIF = BASE / f"{PARTICIPANT}_cleaned_raw_resampled_ica.fif"
+EEG_EPO_FIF   = BASE / f"{PARTICIPANT}_epochs_EEG-epo.fif"
+MISC_EPO_FIF  = BASE / f"{PARTICIPANT}_epochs_MISC-epo.fif"
+OUT_COMBINED  = BASE / f"{PARTICIPANT}_Run{RUN}_epochs_EEG+MISC_combined-epo.fif"
+EVENTS_NPY    = BASE / f"{PARTICIPANT}_events_final.npy"
+ICA_JSON      = BASE / f"{PARTICIPANT}_ica_info.json"
+
+RESAMPLE_SFREQ = 5000
+
+ECG_GATING_SEC = 0.150
+ECG_FILT_L = 5.0
+ECG_FILT_H = 35.0
+
+STIM_TMIN = -0.001
+STIM_TMAX =  0.005
+
+ICA_HP = 1.0
+ICA_DECIM = 2
+ICA_N_COMPONENTS = 40
+RANDOM_STATE = 97
+
+TMIN, TMAX = -0.2, 0.8
+BASELINE_EEG = (None, 0)
+BASELINE_MISC = None
+
+DO_GUI_MARKING = True
+VIZ_SCALINGS = dict(eeg=50e-6, eog=150e-6)
+
+# ============================================================
+# CHANNEL LISTS
+# ============================================================
+EEGCHANNELS = [
+    "Fp1","Fz","F3","F7","FT9","FC5","FC1","C3","T7","TP9",
+    "CP5","CP1","Pz","P3","P7","O1","Oz","O2","P4","P8",
+    "TP10","CP6","CP2","C4","T8","FT10","FC6","FC2","F4","F8",
+    "Fp2","AF7","AF3","AFz","F1","F5","FT7","FC3","C1","C5",
+    "TP7","CP3","P1","P5","PO7","PO3","POz","PO4","PO8","P6",
+    "P2","CPz","CP4","TP8","C6","C2","FC4","FT8","F6","AF8",
+    "AF4","F2"
+]
+SPINALCHANNELS = [
+    "Iz","SC1","SC6","S3","S4","S5","S6","S7","S8","S9",
+    "S11","S12","S13","S14","S15","S16","S17","S18","S19",
+    "AC","TH6","ENG_ERB_REF","ENG_ERB",
+    "ENG_AXILLA","ENG_AXILLA_REF"
+]
+EOG_CHS = ["VEOG", "HEOG"]
+
+# ============================================================
+# Montage (EEG + spinal hardcoded)
+# ============================================================
+spinal_ch_pos = {
+    "Iz":  [ 0.000, -0.105, 0.000],
+    "SC1": [ 0.000, -0.1125, 0.000],
+    "S3":  [ 0.000, -0.120, 0.000],
+    "S6":  [ 0.000, -0.140, 0.000],
+    "SC6": [ 0.000, -0.160, 0.000],
+    "S14": [ 0.000, -0.180, 0.000],
+    "S18": [ 0.000, -0.200, 0.000],
+    "S7":  [ 0.010, -0.130, 0.000],
+    "S11": [ 0.010, -0.150, 0.000],
+    "S15": [ 0.010, -0.170, 0.000],
+    "S19": [ 0.010, -0.190, 0.000],
+    "S5":  [-0.010, -0.130, 0.000],
+    "S9":  [-0.010, -0.150, 0.000],
+    "S13": [-0.010, -0.170, 0.000],
+    "S17": [-0.010, -0.190, 0.000],
+    "S4":  [-0.050, -0.140, 0.000],
+    "S8":  [ 0.050, -0.140, 0.000],
+    "S12": [-0.050, -0.180, 0.000],
+    "S16": [ 0.050, -0.180, 0.000],
+    "ENG_ERB": [-0.090, -0.190, 0.000],
+    "ENG_ERB_REF": [ 0.090, -0.190, 0.000],
+    "AC":  [ 0.050, -0.110, 0.000],
+    "TH6": [ 0.000, -0.300, 0.000],
+}
+for ch in list(spinal_ch_pos.keys()):
+    spinal_ch_pos[ch] = [spinal_ch_pos[ch][0], spinal_ch_pos[ch][1] - 0.01, spinal_ch_pos[ch][2]]
+
+# ============================================================
+# Helpers
+# ============================================================
+def relabel_bad_to_bad_eeg(annotations: mne.Annotations):
+    desc = []
+    for d in annotations.description:
+        if d.lower().startswith("bad"):
+            rest = d[3:]
+            desc.append("bad_eeg" + rest)
+        else:
+            desc.append(d)
+    annotations.description = desc
+    return annotations
+
+def filter_events_outside_bad_prefix(raw: mne.io.BaseRaw, events: np.ndarray, prefix="bad_eeg"):
+    sfreq = raw.info["sfreq"]
+    onset = raw.annotations.onset
+    dur = raw.annotations.duration
+    desc = np.array(raw.annotations.description, dtype=str)
+
+    bad_mask = np.array([d.lower().startswith(prefix) for d in desc])
+    if bad_mask.sum() == 0:
+        return events
+
+    bad_starts = onset[bad_mask]
+    bad_ends = onset[bad_mask] + dur[bad_mask]
+
+    def in_bad(t_sec):
+        return np.any((t_sec >= bad_starts) & (t_sec <= bad_ends))
+
+    kept = []
+    for e in events:
+        t = e[0] / sfreq
+        if not in_bad(t):
+            kept.append(e)
+    return np.array(kept, dtype=int)
+
+def ecg_gate_events(raw: mne.io.BaseRaw, events: np.ndarray):
+    """Descarta eventos a ±ECG_GATING_SEC de cada latido (R-peak) usando compute_proj_ecg (robusto)."""
+    if "ECG" not in raw.ch_names:
+        print("⚠ No ECG channel; skipping ECG gating.")
+        return events
+
+    sfreq = raw.info["sfreq"]
+    win = int(ECG_GATING_SEC * sfreq)
+
+    try:
+        # como tu pipeline original: compute_proj_ecg -> events_ecg
+        projs, events_ecg = mne.preprocessing.compute_proj_ecg(
+            raw, ch_name="ECG", reject=None, n_jobs=1
+        )
+        rpeaks = events_ecg[:, 0].astype(int)
+
+        if len(rpeaks) == 0:
+            print("⚠ ECG gating: no R-peaks detected; skipping.")
+            return events
+
+        def near_rpeak(sample):
+            return np.any(np.abs(rpeaks - sample) <= win)
+
+        kept = np.array([e for e in events if not near_rpeak(int(e[0]))], dtype=int)
+        print(f"ECG gating: kept {len(kept)}/{len(events)} events (compute_proj_ecg)")
+        return kept
+
+    except Exception as e:
+        print("⚠ ECG gating failed; skipping. Reason:", repr(e))
+        return events
+
+
+def refine_events_by_stim_artifact(raw: mne.io.BaseRaw, events: np.ndarray):
+    picks_misc = mne.pick_types(raw.info, misc=True, eeg=False, eog=False, stim=False)
+    if len(picks_misc) == 0:
+        print("⚠ No MISC channels for jitter correction; skipping.")
+        return events
+
+    pick0 = [picks_misc[0]]
+    epochs_tmp = mne.Epochs(
+        raw, events, tmin=-0.1, tmax=0.700,
+        detrend=0, baseline=None, proj=True,
+        preload=True, picks=pick0, verbose=False
+    )
+
+    times = epochs_tmp.times
+    xmin = np.argwhere(times > -0.003).ravel()[0]
+    xmax = np.argwhere(times >  0.003).ravel()[0]
+    zero = np.abs(times).argmin()
+
+    refined = []
+    for i in range(len(epochs_tmp)):
+        y = epochs_tmp[i].get_data()[0][0]
+        treshold = max(abs(np.diff(y[:xmin]))) * 1.5
+        if max(abs(y[:xmin])) < 0.005:
+            try:
+                x = np.where((abs(np.diff(y[xmin:xmax])) > treshold) == True)[0][0] + xmin
+                ev = epochs_tmp[i].events[0].copy()
+                ev[0] += x - zero
+                refined.append(ev)
+            except Exception:
+                pass
+
+    refined = np.array(refined, dtype=int)
+    if refined.size == 0:
+        print("⚠ No refined events found; keeping original events.")
+        return events
+
+    print(f"✅ Jitter correction: refined {len(refined)}/{len(events)} events")
+    return refined
+
+def reref_misc_to_th6(raw: mne.io.BaseRaw):
+    if "TH6" not in raw.ch_names:
+        print("⚠ TH6 not found; skipping MISC re-reference.")
+        return
+
+    th6_idx = raw.ch_names.index("TH6")
+    picks_misc_all = mne.pick_types(raw.info, misc=True, eeg=False, eog=False, stim=False)
+    picks_misc = [i for i in picks_misc_all if raw.ch_names[i] != "TH6"]
+
+    if len(picks_misc) == 0:
+        print("⚠ No MISC channels (excluding TH6) to re-reference.")
+        return
+
+    ref = raw.get_data(picks=[th6_idx])
+    data = raw.get_data(picks=picks_misc)
+    raw._data[picks_misc, :] = data - ref
+    print("✅ Re-referenced MISC to TH6 (X := X - TH6).")
+
+def _event_keys(events: np.ndarray):
+    return np.array([(int(e[0]), int(e[2])) for e in events], dtype=[("s", int), ("c", int)])
+
+def align_misc_to_eeg(epochs_eeg: mne.Epochs, epochs_misc: mne.Epochs) -> mne.Epochs:
+    eeg_keys = _event_keys(epochs_eeg.events)
+    misc_keys = _event_keys(epochs_misc.events)
+
+    mask = np.in1d(misc_keys, eeg_keys)
+    misc_sel = epochs_misc[mask]
+
+    if len(misc_sel) != len(epochs_eeg):
+        raise RuntimeError(f"Mismatch after alignment: EEG={len(epochs_eeg)} MISC={len(misc_sel)}")
+
+    eeg_list = [(int(e[0]), int(e[2])) for e in epochs_eeg.events]
+    misc_list = [(int(e[0]), int(e[2])) for e in misc_sel.events]
+    if eeg_list != misc_list:
+        key_to_idxs = {}
+        for i, k in enumerate(misc_list):
+            key_to_idxs.setdefault(k, []).append(i)
+        reorder = []
+        for k in eeg_list:
+            reorder.append(key_to_idxs[k].pop(0))
+        misc_sel = misc_sel[reorder]
+    return misc_sel
+
+# ============================================================
+# MAIN
+# ============================================================
+def main():
+    if not VHDR_PATH.exists():
+        raise FileNotFoundError(f"Missing VHDR: {VHDR_PATH}")
+
+    print("=== Load VHDR ===")
+    raw = mne.io.read_raw_brainvision(str(VHDR_PATH), preload=True, verbose=False)
+    print("Original sfreq:", raw.info["sfreq"])
+
+    raw.resample(RESAMPLE_SFREQ, npad="auto")
+    print("Resampled sfreq:", raw.info["sfreq"])
+
+    # channel types
+    raw.set_channel_types({ch: "eeg" for ch in EEGCHANNELS if ch in raw.ch_names})
+    raw.set_channel_types({ch: "misc" for ch in SPINALCHANNELS if ch in raw.ch_names})
+    raw.set_channel_types({ch: "eog" for ch in EOG_CHS if ch in raw.ch_names})
+    if "ECG" in raw.ch_names:
+        raw.set_channel_types({"ECG": "ecg"})
+
+    # montage
+    eeg_montage = mne.channels.make_standard_montage("easycap-M1")
+    pos = eeg_montage.get_positions()
+    eeg_ch_pos = pos["ch_pos"].copy()
+    eeg_ch_pos.update(spinal_ch_pos)
+    full_montage = mne.channels.make_dig_montage(
+        ch_pos=eeg_ch_pos,
+        nasion=pos.get("nasion", None),
+        lpa=pos.get("lpa", None),
+        rpa=pos.get("rpa", None),
+        coord_frame="head",
+    )
+    raw.set_montage(full_montage, on_missing="ignore")
+
+    # events
+    stim_picks = mne.pick_types(raw.info, stim=True)
+    if len(stim_picks) > 0:
+        stim_ch = raw.ch_names[stim_picks[0]]
+        events = mne.find_events(raw, stim_channel=stim_ch, shortest_event=1, verbose=False)
+        unique_codes = np.unique(events[:, 2])
+        event_id = {f"code_{c}": int(c) for c in unique_codes}
+        print("Events from stim:", len(events), "| stim_ch:", stim_ch)
+    else:
+        events, event_id = mne.events_from_annotations(raw)
+        print("Events from annotations:", len(events))
+
+    if len(events) == 0:
+        raise RuntimeError("No events found.")
+
+    # 1) ECG gating (ALL)
+    events_final = ecg_gate_events(raw, events)
+
+    # --------------------------------------------------
+    # 🔁 ACTUALIZAR ANNOTATIONS PARA REFLEJAR events_final
+    # (para que la GUI muestre SOLO los eventos tras ECG gating)
+    # --------------------------------------------------
+    inv = {v: k for k, v in event_id.items()}  # code -> description
+    
+    # Borra annotations previas (incluidos triggers originales)
+    raw.set_annotations(mne.Annotations([], [], []))
+    
+    # Crea nuevas annotations SOLO con events_final
+    raw.set_annotations(
+        mne.annotations_from_events(
+            events_final,
+            sfreq=raw.info["sfreq"],
+            event_desc=inv
+        )
+    )
+
+    # 2) GUI bad marking (optional) -> apply gating to ALL
+    if DO_GUI_MARKING:
+        eeg_for_mark = [ch for ch in EEGCHANNELS if ch in raw.ch_names]
+        eog_for_mark = [ch for ch in EOG_CHS if ch in raw.ch_names]
+
+        raw_viz = raw.copy().pick_channels(eeg_for_mark + eog_for_mark)
+        raw_viz.filter(1.0, 40.0, n_jobs=1)
+
+        raw_viz.plot(
+            n_channels=30,
+            scalings=VIZ_SCALINGS,
+            remove_dc=True,
+            block=True,
+            title="Mark bad EEG spans/channels (will become bad_eeg*)"
+        )
+
+        raw.info["bads"] = sorted(set(raw.info.get("bads", []) + raw_viz.info.get("bads", [])))
+        raw.set_annotations(raw.annotations + raw_viz.annotations)
+        raw.set_annotations(relabel_bad_to_bad_eeg(raw.annotations))
+
+        events_final = filter_events_outside_bad_prefix(raw, events_final, prefix="bad_eeg")
+        print("Events after bad_eeg* gating (ALL):", len(events_final))
+
+    if len(events_final) == 0:
+        raise RuntimeError("events_final quedó vacío.")
+
+    # 3) Jitter correction
+    events_final = refine_events_by_stim_artifact(raw, events_final)
+
+    # 4) fix stim artifact (ALL)
+    mne.preprocessing.fix_stim_artifact(
+        raw, events=events_final,
+        tmin=STIM_TMIN, tmax=STIM_TMAX,
+        mode="linear"
+    )
+    print("Applied fix_stim_artifact:", (STIM_TMIN, STIM_TMAX))
+
+    # 5) Re-ref MISC to TH6
+    reref_misc_to_th6(raw)
+
+    # 6) MISC filter 50–800
+    picks_misc = mne.pick_types(raw.info, misc=True, eeg=False, eog=False, stim=False)
+    if len(picks_misc) > 0:
+        raw.filter(40.0, 800.0, picks=picks_misc, n_jobs=1)
+        print("Applied MISC filter: 50–800 Hz")
+
+    # 7) ICA on EEG (fit copy HP=1)
+    raw.set_eeg_reference("average", projection=True)
+
+    picks_eeg = mne.pick_types(raw.info, eeg=True, eog=False, stim=False, misc=False)
+    picks_eog = mne.pick_types(raw.info, eog=True)
+
+    raw_for_ica = raw.copy().pick(picks_eeg.tolist() + picks_eog.tolist())
+    raw_for_ica.filter(ICA_HP, None, n_jobs=1)
+    raw_for_ica.apply_proj()
+
+    ica = ICA(n_components=ICA_N_COMPONENTS, method="fastica", random_state=RANDOM_STATE, max_iter="auto")
+    ica.fit(raw_for_ica, picks="eeg", decim=ICA_DECIM)
+
+    # excluir componentes por EOG si existe
+    exclude = set()
+    for ch in EOG_CHS:
+        if ch in raw_for_ica.ch_names:
+            inds, _ = ica.find_bads_eog(raw_for_ica, ch_name=ch)
+            exclude |= set(inds)
+    ica.exclude = sorted(exclude)
+    print("ICA exclude:", ica.exclude)
+
+    ica.apply(raw)
+
+    # 8) EEG filter 1–40
+    if len(picks_eeg) > 0:
+        raw.filter(1.0, 40.0, picks=picks_eeg, n_jobs=1)
+        print("Applied EEG filter: 1–40 Hz")
+
+    # save events
+    np.save(str(EVENTS_NPY), events_final)
+
+    # 9) Epoch EEG + MISC using same events
+    epochs_eeg = mne.Epochs(
+        raw, events_final, event_id=event_id,
+        tmin=TMIN, tmax=TMAX,
+        picks=picks_eeg,
+        baseline=BASELINE_EEG,
+        preload=True,
+        reject_by_annotation=False,
+        event_repeated="drop",
+        verbose=False
+    )
+
+    epochs_misc = mne.Epochs(
+        raw, events_final, event_id=event_id,
+        tmin=TMIN, tmax=TMAX,
+        picks=picks_misc,
+        baseline=BASELINE_MISC,
+        preload=True,
+        reject_by_annotation=False,
+        event_repeated="drop",
+        verbose=False
+    )
+
+    # 10) Merge
+    epochs_misc_aligned = align_misc_to_eeg(epochs_eeg, epochs_misc)
+
+    data_comb = np.concatenate([epochs_misc_aligned.get_data(), epochs_eeg.get_data()], axis=1)
+    ch_names = epochs_misc_aligned.ch_names + epochs_eeg.ch_names
+    ch_types = (["misc"] * len(epochs_misc_aligned.ch_names)) + (["eeg"] * len(epochs_eeg.ch_names))
+    info = mne.create_info(ch_names=ch_names, sfreq=raw.info["sfreq"], ch_types=ch_types)
+
+    combined = mne.EpochsArray(
+        data=data_comb,
+        info=info,
+        events=epochs_eeg.events,
+        tmin=epochs_eeg.tmin,
+        event_id=epochs_eeg.event_id
+    )
+    combined.set_montage(raw.get_montage(), on_missing="ignore")
+
+    # save all
+    raw.save(str(RAW_CLEAN_FIF), overwrite=True)
+    epochs_eeg.save(str(EEG_EPO_FIF), overwrite=True)
+    epochs_misc.save(str(MISC_EPO_FIF), overwrite=True)
+    combined.save(str(OUT_COMBINED), overwrite=True)
+
+    with open(str(ICA_JSON), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "participant": PARTICIPANT,
+                "run": RUN,
+                "vhdr_path": str(VHDR_PATH),
+                "resample_sfreq": int(RESAMPLE_SFREQ),
+                "ecg_gating_sec": float(ECG_GATING_SEC),
+                "stim_fix_window": [STIM_TMIN, STIM_TMAX],
+                "misc_reref": "X := X - TH6 (TH6 kept)",
+                "misc_filter": [50.0, 800.0],
+                "eeg_filter": [1.0, 40.0],
+                "ica_hp": float(ICA_HP),
+                "ica_decim": int(ICA_DECIM),
+                "ica_n_components": int(ICA_N_COMPONENTS),
+                "ica_exclude": [int(x) for x in ica.exclude],
+                "bad_channels": list(raw.info.get("bads", [])),
+                "events_initial": int(len(events)),
+                "events_final": int(len(events_final)),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    print("\n✅ DONE")
+    print("Raw clean:", RAW_CLEAN_FIF)
+    print("EEG epochs:", EEG_EPO_FIF)
+    print("MISC epochs:", MISC_EPO_FIF)
+    print("Combined epochs:", OUT_COMBINED)
+    print("Events:", EVENTS_NPY)
+    print("ICA info:", ICA_JSON)
+
+if __name__ == "__main__":
+    main()
