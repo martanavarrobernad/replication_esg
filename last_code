@@ -428,6 +428,21 @@ def main():
 
     # save events
     np.save(str(EVENTS_NPY), events_final)
+    
+    # --- Make event_id robust: keep only conditions that exist in events_final ---
+    present_codes = set(events_final[:, 2])
+    missing_keys = [k for k, v in event_id.items() if v not in present_codes]
+    
+    if missing_keys:
+        print(f" Warning: these event types have 0 events in events_final and will be ignored: {missing_keys}")
+    
+    event_id = {k: v for k, v in event_id.items() if v in present_codes}
+    
+    # If everything disappeared (e.g., extreme gating), warn and stop gracefully
+    if len(event_id) == 0 or len(events_final) == 0:
+        print(" Warning: events_final is empty after gating (or event_id empty). Skipping epoching.")
+        return  # if inside a main() function
+
 
     # 9) Epoch EEG + MISC using same events
     epochs_eeg = mne.Epochs(
@@ -510,3 +525,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
