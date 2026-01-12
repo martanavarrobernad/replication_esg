@@ -1,0 +1,391 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Jan 12 15:51:53 2026
+
+@author: navar
+"""
+
+# ============================================================
+# READY-TO-RUN PIPELINE (MNE + BrainVision) — FIXED EVENTS
+# Objetivo B: rechazo SOLO para EEG (bad_eeg*), MISC intacto
+# Cambios clave:
+#  - bad_eeg* se queda como ANNOTATIONS (NO se convierte a eventos)
+#  - Si usamos events_from_annotations, filtramos fuera bad_eeg*/bad*
+#  - event_repeated="drop" para evitar colisiones de triggers reales
+#  - ICA.apply(raw) (sin picks) para compatibilidad con tu MNE
+# ============================================================
+
+import os
+import json
+import numpy as np
+import mne
+from mne.preprocessing import ICA, annotate_amplitude, annotate_break
+
+# -------------------------------
+# PATH
+# -------------------------------
+vhdr_path = r"C:\Users\navar\Desktop\sub-P01\sub-P01\MULTICONS_2025-12-16_Run1.vhdr" #hardcode
+out_dir = os.path.dirname(vhdr_path)
+
+# -------------------------------
+# CHANNEL LISTS
+# -------------------------------
+EEGCHANNELS = [
+    "Fp1","Fz","F3","F7","FT9","FC5","FC1","C3","T7","TP9",
+    "CP5","CP1","Pz","P3","P7","O1","Oz","O2","P4","P8",
+    "TP10","CP6","CP2","C4","T8","FT10","FC6","FC2","F4","F8",
+    "Fp2","AF7","AF3","AFz","F1","F5","FT7","FC3","C1","C5",
+    "TP7","CP3","P1","P5","PO7","PO3","POz","PO4","PO8","P6",
+    "P2","CPz","CP4","TP8","C6","C2","FC4","FT8","F6","AF8",
+    "AF4","F2"
+]
+
+SPINALCHANNELS = [
+    "Iz","SC1","SC6","S3","S4","S5","S6","S7","S8","S9",
+    "S11","S12","S13","S14","S15","S16","S17","S18","S19",
+    "AC","TH6","ENG_ERB_REF","ENG_ERB",
+    "ENG_AXILLA","ENG_AXILLA_REF"
+]
+
+EOG_CHS = ["VEOG", "HEOG"]
+
+# -------------------------------
+# PARAMS
+# -------------------------------
+RESAMPLE_SFREQ = 1000
+VIZ_SCALINGS = dict(eeg=50e-6, eog=150e-6)
+
+DO_AUTO_ANNOTATION = False      # set True if you want amplitude-based bad spans
+AUTO_AMP_PEAK = 150e-6
+
+DO_BREAK_ANNOTATION = False     # set True if you want breaks labeled bad_eeg_break
+
+INTERPOLATE_BADS_BEFORE_ICA = True
+
+ICA_HP = 1.0
+ICA_DECIM = 2
+ICA_N_COMPONENTS = 40
+
+# Epochs params (adjust)
+TMIN, TMAX = -0.2, 0.8
+BASELINE = (None, 0)
+
+# ============================================================
+# Helpers
+# ============================================================
+def relabel_bad_to_bad_eeg(annotations: mne.Annotations):
+    desc = []
+    for d in annotations.description:
+        if d.lower().startswith("bad"):
+            rest = d[3:]  # keep suffix
+            desc.append("bad_eeg" + rest)
+        else:
+            desc.append(d)
+    annotations.description = desc
+    return annotations
+
+def filter_events_outside_bad_prefix(raw: mne.io.BaseRaw, events: np.ndarray, prefix="bad_eeg"):
+    sfreq = raw.info["sfreq"]
+    onset = raw.annotations.onset
+    dur = raw.annotations.duration
+    desc = np.array(raw.annotations.description, dtype=str)
+
+    bad_mask = np.array([d.lower().startswith(prefix) for d in desc])
+    if bad_mask.sum() == 0:
+        return events
+
+    bad_starts = onset[bad_mask]
+    bad_ends = onset[bad_mask] + dur[bad_mask]
+
+    def in_bad(t_sec):
+        return np.any((t_sec >= bad_starts) & (t_sec <= bad_ends))
+
+    kept = []
+    for e in events:
+        t = e[0] / sfreq
+        if not in_bad(t):
+            kept.append(e)
+    return np.array(kept, dtype=int)
+
+def events_from_annotations_without_bads(raw):
+    """Create events from annotations but EXCLUDE bad_eeg*/bad* annotations from becoming events."""
+    events, event_id = mne.events_from_annotations(raw)
+
+    # Keep only non-bad keys
+    keep_keys = [
+        k for k in event_id.keys()
+        if (not k.lower().startswith("bad_eeg")) and (not k.lower().startswith("bad"))
+    ]
+    event_id_keep = {k: event_id[k] for k in keep_keys}
+
+    keep_codes = set(event_id_keep.values())
+    events_keep = events[np.array([e[2] in keep_codes for e in events], dtype=bool)]
+
+    return events_keep, event_id_keep
+
+def to_jsonable(x):
+    import numpy as np
+    if isinstance(x, (np.integer,)):
+        return int(x)
+    if isinstance(x, (np.floating,)):
+        return float(x)
+    if isinstance(x, (np.ndarray,)):
+        return x.tolist()
+    if isinstance(x, (list, tuple)):
+        return [to_jsonable(v) for v in x]
+    if isinstance(x, dict):
+        return {str(k): to_jsonable(v) for k, v in x.items()}
+    return x
+
+
+# ============================================================
+# 1) LOAD + RESAMPLE ALL
+# ============================================================
+raw = mne.io.read_raw_brainvision(vhdr_path, preload=True)
+print("Loaded:", vhdr_path)
+print("Original sfreq:", raw.info["sfreq"])
+
+raw.resample(RESAMPLE_SFREQ, npad="auto")
+print("Resampled sfreq:", raw.info["sfreq"])
+
+# ============================================================
+# 2) CHANNEL TYPES
+# ============================================================
+raw.set_channel_types({ch: "eeg" for ch in EEGCHANNELS if ch in raw.ch_names})
+raw.set_channel_types({ch: "misc" for ch in SPINALCHANNELS if ch in raw.ch_names})
+raw.set_channel_types({ch: "eog" for ch in EOG_CHS if ch in raw.ch_names})
+
+if "ECG" in raw.ch_names:
+    raw.set_channel_types({"ECG": "ecg"})
+
+for ch in ["ENG_AXILLA", "ENG_AXILLA_REF"]:
+    if ch in raw.ch_names:
+        raw.set_channel_types({ch: "misc"})
+
+# ============================================================
+# 3) MONTAGE (EEG easycap-M1 + spinal hardcoded)
+# ============================================================
+spinal_ch_pos = {
+    "Iz":  [ 0.000, -0.105, 0.000],
+    "SC1": [ 0.000, -0.1125, 0.000],
+    "S3":  [ 0.000, -0.120, 0.000],
+    "S6":  [ 0.000, -0.140, 0.000],
+    "SC6": [ 0.000, -0.160, 0.000],
+    "S14": [ 0.000, -0.180, 0.000],
+    "S18": [ 0.000, -0.200, 0.000],
+    "S7":  [ 0.010, -0.130, 0.000],
+    "S11": [ 0.010, -0.150, 0.000],
+    "S15": [ 0.010, -0.170, 0.000],
+    "S19": [ 0.010, -0.190, 0.000],
+    "S5":  [-0.010, -0.130, 0.000],
+    "S9":  [-0.010, -0.150, 0.000],
+    "S13": [-0.010, -0.170, 0.000],
+    "S17": [-0.010, -0.190, 0.000],
+    "S4":  [-0.050, -0.140, 0.000],
+    "S8":  [ 0.050, -0.140, 0.000],
+    "S12": [-0.050, -0.180, 0.000],
+    "S16": [ 0.050, -0.180, 0.000],
+    "ENG_ERB": [-0.090, -0.190, 0.000],
+    "ENG_ERB_REF": [ 0.090, -0.190, 0.000],
+    "AC":  [ 0.050, -0.110, 0.000],
+    "TH6": [ 0.000, -0.300, 0.000],
+}
+for ch in list(spinal_ch_pos.keys()):
+    spinal_ch_pos[ch] = [spinal_ch_pos[ch][0], spinal_ch_pos[ch][1] - 0.01, spinal_ch_pos[ch][2]]
+
+eeg_montage = mne.channels.make_standard_montage("easycap-M1")
+pos = eeg_montage.get_positions()
+eeg_ch_pos = pos["ch_pos"].copy()
+eeg_ch_pos.update(spinal_ch_pos)
+
+full_montage = mne.channels.make_dig_montage(
+    ch_pos=eeg_ch_pos,
+    nasion=pos.get("nasion", None),
+    lpa=pos.get("lpa", None),
+    rpa=pos.get("rpa", None),
+    coord_frame="head",
+)
+raw.set_montage(full_montage, on_missing="ignore")
+
+# ============================================================
+# SINGLE STOP: Inspect channels + mark bad segments (EEG-only)
+# ============================================================
+eeg_for_mark = [ch for ch in EEGCHANNELS if ch in raw.ch_names]
+eog_for_mark = [ch for ch in EOG_CHS if ch in raw.ch_names]
+
+raw_viz = raw.copy().pick(eeg_for_mark + eog_for_mark)
+raw_viz.filter(1.0, 40.0)
+
+raw_viz.plot(
+    n_channels=30,
+    scalings=VIZ_SCALINGS,
+    remove_dc=True,
+    block=True
+)
+
+# Copy manual annotations and relabel to bad_eeg*
+raw.set_annotations(raw.annotations + raw_viz.annotations)
+raw.set_annotations(relabel_bad_to_bad_eeg(raw.annotations))
+
+manual_csv = os.path.join(out_dir, "annotations_bad_eeg_manual.csv")
+raw.annotations.save(manual_csv, overwrite=True)
+print("Saved:", manual_csv)
+
+print("\n=== NOW SET BAD CHANNELS (MANUAL) ===")
+print("Example:")
+print("raw.info['bads'] = ['T7','T8','F8']")
+print("or add:")
+print("raw.info['bads'] = sorted(set(raw.info['bads']))")
+print("Then continue execution.\n")
+
+# ------------------------------------------------------------
+# USER ACTION: edit raw.info['bads'] in your script/notebook here
+# ------------------------------------------------------------
+
+# Optional: interpolate bad EEG channels before ICA (recommended)
+if INTERPOLATE_BADS_BEFORE_ICA and len(raw.info.get("bads", [])) > 0:
+    raw.interpolate_bads(reset_bads=False)
+
+# Optional: amplitude-based bad spans (ONLY EEG) labeled bad_eeg*
+if DO_AUTO_ANNOTATION:
+    picks_eeg = mne.pick_channels(raw.ch_names, include=eeg_for_mark)
+    annot_amp, _ = annotate_amplitude(raw, peak=AUTO_AMP_PEAK, picks=picks_eeg, bad_percent=5)
+    annot_amp = relabel_bad_to_bad_eeg(annot_amp)
+    raw.set_annotations(raw.annotations + annot_amp)
+
+# Optional: breaks labeled bad_eeg_break
+if DO_BREAK_ANNOTATION:
+    annot_brk = annotate_break(raw, t_start_after_previous=5.0, t_stop_before_next=5.0)
+    annot_brk.description = np.array(["bad_eeg_break"] * len(annot_brk), dtype=str)
+    raw.set_annotations(raw.annotations + annot_brk)
+
+all_csv = os.path.join(out_dir, "annotations_bad_eeg_all.csv")
+raw.annotations.save(all_csv, overwrite=True)
+print("Saved:", all_csv)
+
+# ============================================================
+# 4) ICA (fit on EEG+EOG copy; apply to raw)
+# ============================================================
+raw.set_eeg_reference("average", projection=True)
+
+raw_for_ica = raw.copy().pick(eeg_for_mark + eog_for_mark)
+raw_for_ica.filter(l_freq=ICA_HP, h_freq=None)
+raw_for_ica.apply_proj()
+
+ica = ICA(n_components=ICA_N_COMPONENTS, method="fastica", random_state=97)
+ica.fit(raw_for_ica, picks="eeg", decim=ICA_DECIM)
+
+exclude = set()
+scores_dict = {}
+for ch in EOG_CHS:
+    if ch in raw_for_ica.ch_names:
+        inds, scores = ica.find_bads_eog(raw_for_ica, ch_name=ch)
+        exclude |= set(inds)
+        scores_dict[ch] = scores
+
+ica.exclude = sorted(exclude)
+print("ICA exclude (VEOG+HEOG):", ica.exclude)
+
+# QC optional
+for ch, scores in scores_dict.items():
+    ica.plot_scores(scores, title=f"{ch} scores")
+if len(ica.exclude) > 0:
+    ica.plot_components(picks=ica.exclude)
+
+# IMPORTANT: older MNE compatibility (no picks kwarg)
+ica.apply(raw)
+
+# ============================================================
+# 5) EVENTS (avoid converting bad_eeg* to events)
+# ============================================================
+events = None
+event_id = None
+
+stim_picks = mne.pick_types(raw.info, stim=True)
+if len(stim_picks) > 0:
+    stim_ch = raw.ch_names[stim_picks[0]]
+    print("Using stim channel:", stim_ch)
+    events = mne.find_events(raw, stim_channel=stim_ch, shortest_event=1)
+    unique_codes = np.unique(events[:, 2])
+    event_id = {f"code_{c}": int(c) for c in unique_codes}
+else:
+    events, event_id = events_from_annotations_without_bads(raw)
+    print("Using events_from_annotations WITHOUT bad_eeg*/bad*.")
+    print("event_id keys (sample):", list(event_id)[:10])
+
+if events is None or len(events) == 0:
+    raise RuntimeError("No events found (stim or annotations).")
+
+print("Total stimulus events:", len(events))
+
+# ============================================================
+# 6) EPOCHS: EEG excludes bad_eeg*, MISC keeps all events
+# ============================================================
+events_eeg = filter_events_outside_bad_prefix(raw, events, prefix="bad_eeg")
+print("EEG events after excluding bad_eeg*:", len(events_eeg))
+
+picks_eeg = mne.pick_channels(raw.ch_names, include=eeg_for_mark)
+epochs_eeg = mne.Epochs(
+    raw, events_eeg, event_id=event_id,
+    tmin=TMIN, tmax=TMAX,
+    picks=picks_eeg,
+    baseline=BASELINE,
+    preload=True,
+    reject_by_annotation=False,
+    event_repeated="drop"
+)
+
+picks_misc = mne.pick_types(raw.info, misc=True, eeg=False, eog=False, ecg=False, emg=False, stim=False, meg=False)
+epochs_misc = mne.Epochs(
+    raw, events, event_id=event_id,
+    tmin=TMIN, tmax=TMAX,
+    picks=picks_misc,
+    baseline=None,
+    preload=True,
+    reject_by_annotation=False,
+    event_repeated="drop"
+)
+
+# ============================================================
+# 7) SAVE
+# ============================================================
+raw_fif = os.path.join(out_dir, "sub-P01_cleaned_raw_resampled_ica.fif")
+raw.save(raw_fif, overwrite=True)
+
+epochs_eeg_fif = os.path.join(out_dir, "sub-P01_epochs_EEG_badEEG_rejected-epo.fif")
+epochs_eeg.save(epochs_eeg_fif, overwrite=True)
+
+epochs_misc_fif = os.path.join(out_dir, "sub-P01_epochs_MISC_no_reject-epo.fif")
+epochs_misc.save(epochs_misc_fif, overwrite=True)
+
+ica_json = os.path.join(out_dir, "sub-P01_ica_info.json")
+with open(ica_json, "w", encoding="utf-8") as f:
+    json.dump(
+        {
+            "vhdr_path": vhdr_path,
+            "resample_sfreq": int(RESAMPLE_SFREQ),          # 👈
+            "raw_bads": list(raw.info.get("bads", [])),
+            "annotations_manual_csv": manual_csv,
+            "annotations_all_csv": all_csv,
+            "ica_hp": float(ICA_HP),                         # 👈
+            "ica_decim": int(ICA_DECIM),                     # 👈
+            "ica_n_components": int(ICA_N_COMPONENTS),
+            "ica_exclude": [int(x) for x in ica.exclude],    # 👈
+            "eog_used": [ch for ch in EOG_CHS if ch in raw.ch_names],
+            "note": (
+                "bad_eeg* kept as annotations; excluded ONLY for EEG "
+                "by filtering events_eeg; misc uses all stimulus events."
+            ),
+        },
+        f,
+        indent=2,
+        ensure_ascii=False,
+    )
+
+print("\n✅ DONE")
+print("Raw:", raw_fif)
+print("Annotations manual:", manual_csv)
+print("Annotations all:", all_csv)
+print("EEG epochs:", epochs_eeg_fif)
+print("MISC epochs:", epochs_misc_fif)
+print("ICA info:", ica_json)
