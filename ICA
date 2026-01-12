@@ -223,6 +223,16 @@ raw_viz.plot(
     block=True
 )
 
+# ✅ COPIAR BAD CHANNELS marcados en la GUI (raw_viz) al raw principal
+raw.info["bads"] = sorted(set(raw.info.get("bads", []) + raw_viz.info.get("bads", [])))
+print("Bad channels en RAW (tras GUI):", raw.info["bads"])
+
+# 🔍 COMPROBACIÓN DE SEGURIDAD
+assert set(raw_viz.info.get("bads", [])).issubset(set(raw.info.get("bads", []))), \
+    "❌ Algunos canales marcados como malos en la GUI no se copiaron al raw principal"
+
+
+
 # Copy manual annotations and relabel to bad_eeg*
 raw.set_annotations(raw.annotations + raw_viz.annotations)
 raw.set_annotations(relabel_bad_to_bad_eeg(raw.annotations))
@@ -230,17 +240,6 @@ raw.set_annotations(relabel_bad_to_bad_eeg(raw.annotations))
 manual_csv = os.path.join(out_dir, "annotations_bad_eeg_manual.csv")
 raw.annotations.save(manual_csv, overwrite=True)
 print("Saved:", manual_csv)
-
-print("\n=== NOW SET BAD CHANNELS (MANUAL) ===")
-print("Example:")
-print("raw.info['bads'] = ['T7','T8','F8']")
-print("or add:")
-print("raw.info['bads'] = sorted(set(raw.info['bads']))")
-print("Then continue execution.\n")
-
-# ------------------------------------------------------------
-# USER ACTION: edit raw.info['bads'] in your script/notebook here
-# ------------------------------------------------------------
 
 # Optional: interpolate bad EEG channels before ICA (recommended)
 if INTERPOLATE_BADS_BEFORE_ICA and len(raw.info.get("bads", [])) > 0:
@@ -363,14 +362,14 @@ with open(ica_json, "w", encoding="utf-8") as f:
     json.dump(
         {
             "vhdr_path": vhdr_path,
-            "resample_sfreq": int(RESAMPLE_SFREQ),          # 👈
+            "resample_sfreq": int(RESAMPLE_SFREQ),          # 
             "raw_bads": list(raw.info.get("bads", [])),
             "annotations_manual_csv": manual_csv,
             "annotations_all_csv": all_csv,
-            "ica_hp": float(ICA_HP),                         # 👈
-            "ica_decim": int(ICA_DECIM),                     # 👈
+            "ica_hp": float(ICA_HP),                         # 
+            "ica_decim": int(ICA_DECIM),                     # 
             "ica_n_components": int(ICA_N_COMPONENTS),
-            "ica_exclude": [int(x) for x in ica.exclude],    # 👈
+            "ica_exclude": [int(x) for x in ica.exclude],    # 
             "eog_used": [ch for ch in EOG_CHS if ch in raw.ch_names],
             "note": (
                 "bad_eeg* kept as annotations; excluded ONLY for EEG "
