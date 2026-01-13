@@ -1,0 +1,135 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 13 17:11:40 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+SCRIPT 3C: VISUALIZACIÓN FINAL (Ondas y Picos)
+----------------------------------------------
+Carga el archivo combinado y genera las gráficas comparativas
+Standard vs Deviant vs Difference para tus ROIs.
+"""
+import matplotlib
+try: matplotlib.use('Qt5Agg')
+except: pass
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+# =============================================================================
+# 1. CONFIGURACIÓN (Tus ROIs y Ventanas)
+# =============================================================================
+BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+# Usamos el archivo maestro generado en el Script 3A
+INPUT_FILE = BASE_PATH / "sub-P01_COMBINED_epo.fif"
+
+# Definición de Regiones de Interés (ROIs)
+MIS_ROIS = {
+    'MMN Clasica (Frontal)':    ['Fz', 'FC1', 'FC2'], 
+    'P3b Clasica (Parietal)':   ['Pz', 'Cz'],
+    'Somato Izquierdo (C3)':    ['C3', 'CP3'], 
+    'Somato Derecho (C4)':      ['C4', 'CP4']  
+}
+
+# Ventanas de tiempo para buscar el pico (en segundos)
+VENTANA_MMN = (0.130, 0.230) # Busca el mínimo (negativo)
+VENTANA_P3B = (0.350, 0.550) # Busca el máximo (positivo)
+
+# =============================================================================
+# 2. CARGA Y PROMEDIO
+# =============================================================================
+print(f"Cargando {INPUT_FILE.name}...")
+epochs = mne.read_epochs(INPUT_FILE, preload=True, verbose=False)
+
+# Chequeo de seguridad: ¿Existen los canales que pides?
+# Si algún canal de tus ROIs fue borrado, lo quitamos de la lista para que no de error
+for roi, chs in MIS_ROIS.items():
+    MIS_ROIS[roi] = [ch for ch in chs if ch in epochs.ch_names]
+
+print("Calculando Evokeds (Promedios)...")
+
+# --- MANO IZQUIERDA ---
+l_std = epochs[['113','114','115','116']].average()
+l_dev = epochs['121'].average()
+l_diff = mne.combine_evoked([l_dev, l_std], weights=[1, -1])
+
+# --- MANO DERECHA ---
+r_std = epochs[['213','214','215','216']].average()
+r_dev = epochs['221'].average()
+r_diff = mne.combine_evoked([r_dev, r_std], weights=[1, -1])
+
+# =============================================================================
+# 3. FUNCIÓN DE PLOTEO Y CÁLCULO
+# =============================================================================
+# Estilos profesionales
+mis_colores = {'Standard': 'black', 'Deviant': 'red', 'Difference': 'blue'}
+mis_estilos = {'Standard': '--',    'Deviant': '-',   'Difference': '-'} # Standard punteado
+
+def analizar_roi(roi_name, picks, evokeds_dict, title_prefix):
+    """
+    1. Pinta la gráfica con las 3 líneas.
+    2. Calcula e imprime los picos MMN y P3b.
+    """
+    if not picks:
+        print(f"Saltando {roi_name}: No hay canales válidos.")
+        return
+
+    # A) GRÁFICA CORREGIDA (Sin xlim)
+    mne.viz.plot_compare_evokeds(
+        evokeds_dict,
+        picks=picks,
+        combine='mean',      # Promedia los canales de la ROI
+        title=f"{title_prefix}: {roi_name}",
+        colors=mis_colores,
+        linestyles=mis_estilos,
+        invert_y=True,       # Negativo hacia arriba
+        show_sensors=False,
+        show=False           # No bloquea el script
+        # xlim eliminiado: MNE usará el tiempo de las épocas (-0.1 a 0.65) automáticamente
+    )
+
+    # B) CÁLCULO NUMÉRICO
+    diff_wave = evokeds_dict['Difference']
+    
+    # Extraemos los datos promediados (n_channels, n_times) -> mean -> (n_times)
+    data = diff_wave.copy().pick(picks).get_data().mean(axis=0)
+    times = diff_wave.times
+    
+    # 1. Pico MMN (Mínimo en ventana)
+    idx_mmn = (times >= VENTANA_MMN[0]) & (times <= VENTANA_MMN[1])
+    if np.any(idx_mmn):
+        val_mmn = np.min(data[idx_mmn]) * 1e6 
+        lat_mmn = times[idx_mmn][np.argmin(data[idx_mmn])] * 1000 
+    else: val_mmn, lat_mmn = 0, 0
+
+    # 2. Pico P3b (Máximo en ventana)
+    idx_p3b = (times >= VENTANA_P3B[0]) & (times <= VENTANA_P3B[1])
+    if np.any(idx_p3b):
+        val_p3b = np.max(data[idx_p3b]) * 1e6 
+        lat_p3b = times[idx_p3b][np.argmax(data[idx_p3b])] * 1000 
+    else: val_p3b, lat_p3b = 0, 0
+
+    print(f"--- {title_prefix} [{roi_name}] ---")
+    print(f"   MMN: {val_mmn:.2f} µV a los {lat_mmn:.0f} ms")
+    print(f"   P3b: {val_p3b:.2f} µV a los {lat_p3b:.0f} ms")
+# =============================================================================
+# 4. EJECUCIÓN FINAL
+# =============================================================================
+print("\n=== RESULTADOS DEL ANÁLISIS ===")
+
+for nombre_roi, canales in MIS_ROIS.items():
+    # Análisis Mano Izquierda
+    diccionario_izq = {'Standard': l_std, 'Deviant': l_dev, 'Difference': l_diff}
+    analizar_roi(nombre_roi, canales, diccionario_izq, "MANO IZQUIERDA")
+    
+    # Análisis Mano Derecha
+    diccionario_der = {'Standard': r_std, 'Deviant': r_dev, 'Difference': r_diff}
+    analizar_roi(nombre_roi, canales, diccionario_der, "MANO DERECHA")
+
+print("\n¡Proceso terminado! Revisa las gráficas flotantes.")
+plt.show(block=True)
