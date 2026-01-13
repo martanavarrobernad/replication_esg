@@ -1,0 +1,54 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 13 17:04:33 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+SCRIPT FIX: REPARACIÓN RÁPIDA DE CANALES
+----------------------------------------
+Abre los archivos ya procesados, interpola los canales que marcaste
+como malos y guarda los cambios. 
+Esto soluciona el problema de concatenación sin tener que repetir el trabajo manual.
+"""
+import mne
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN
+# =============================================================================
+BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+
+# Buscamos tus archivos de épocas (los que acabas de guardar)
+epo_files = sorted(list(BASE_PATH.glob("*_epo.fif")))
+
+print(f"Encontrados {len(epo_files)} archivos para revisar.")
+
+# =============================================================================
+# BUCLE DE REPARACIÓN
+# =============================================================================
+for f in epo_files:
+    print(f"\nRevisando: {f.name}...")
+    
+    # Cargamos el archivo
+    epochs = mne.read_epochs(f, preload=True, verbose=False)
+    
+    # ¿Hay canales marcados como malos (bads)?
+    if len(epochs.info['bads']) > 0:
+        print(f" -> ¡ENCONTRADOS CANALES MALOS!: {epochs.info['bads']}")
+        print(" -> Interpolando (reparando) para igualar geometría...")
+        
+        # AQUÍ ESTÁ LA MAGIA:
+        # Reconstruye el canal malo usando los vecinos y borra la marca "bad"
+        epochs.interpolate_bads(reset_bads=True, verbose=False)
+        
+        # Guardamos sobreescribiendo el mismo archivo para que el Script 3 funcione directo
+        epochs.save(f, overwrite=True)
+        print(" -> ¡Reparado y Guardado!")
+        
+    else:
+        print(" -> Todo limpio. No necesita cambios.")
+
+print("\n¡LISTO! Ahora ya puedes ejecutar el Script 3 (Concatenación) sin errores.")
