@@ -1,0 +1,42 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 13 12:09:39 2026
+
+@author: navar
+"""
+
+import mne
+import matplotlib.pyplot as plt
+
+# Definición con gaps de 3cm y posiciones ANTERIORES (Z > 0)
+spinal_ch_pos = {
+    "Iz":  [ 0.000, -0.105, 0.000],
+    "SC1": [ 0.000, -0.135, 0.000],  # 3cm desde Iz
+    "S3":  [ 0.000, -0.165, 0.000],  # 3cm desde SC1
+    "AC":  [ 0.050, -0.150, 0.050],  # Entre SC1 y S3 (-0.150), Anterior (Z=0.05)
+    
+    # Rejilla desplazada para mantener coherencia (Row 4 a Row 11)
+    "S5":  [-0.010, -0.175, 0.000], "S7":  [ 0.010, -0.175, 0.000], # Row 4
+    "S4":  [-0.050, -0.185, 0.000], "S6":  [ 0.000, -0.185, 0.000], "S8":  [ 0.050, -0.185, 0.000], # Row 5
+    "S9":  [-0.010, -0.195, 0.000], "S11": [ 0.010, -0.195, 0.000], # Row 6
+    "SC6": [ 0.000, -0.205, 0.000], # Row 7
+    "S13": [-0.010, -0.215, 0.000], "S15": [ 0.010, -0.215, 0.000], # Row 8
+    "S12": [-0.050, -0.225, 0.000], "S14": [ 0.000, -0.225, 0.000], "S16": [ 0.050, -0.225, 0.000], # Row 9
+    "S17": [-0.010, -0.235, 0.000], "S19": [ 0.010, -0.235, 0.000], # Row 10
+    "S18": [ 0.000, -0.245, 0.000], # Row 11
+
+    # ERBS: 2cm debajo de Row 9 (-0.225 - 0.02 = -0.245) y ANTERIORES
+    "ENG_ERB":     [-0.050, -0.275, 0.050], 
+    "ENG_ERB_REF": [ 0.050, -0.275, 0.050],
+    
+    "TH6": [ 0.000, -0.350, 0.000], # Bajado para ser la referencia caudal
+}
+
+# Ajuste final de -1cm para todo el bloque
+for ch in spinal_ch_pos:
+    spinal_ch_pos[ch][1] -= 0.01
+
+# Crear y visualizar el montaje
+montage_esg = mne.channels.make_dig_montage(ch_pos=spinal_ch_pos)
+montage_esg.plot(show_names=True)
+plt.show()
