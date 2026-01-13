@@ -1,0 +1,45 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 13 15:26:29 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+SCRIPT A: PREPARACIÓN (Recuperar Cz y Guardar)
+----------------------------------------------
+Solo ejecuta esto UNA VEZ.
+Crea un nuevo archivo con el canal Cz reconstruido.
+"""
+import mne
+from pathlib import Path
+
+# 1. CONFIGURACIÓN
+BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+INPUT_FILE = BASE_PATH / "sub-P01_MMN_P3b_Stable_epo.fif"
+OUTPUT_FILE = BASE_PATH / "sub-P01_MMN_P3b_Stable_Cz_epo.fif" # Nuevo archivo
+
+# 2. CARGA
+print("Cargando datos...")
+epochs = mne.read_epochs(INPUT_FILE, preload=True, verbose=False)
+
+# 3. RECUPERACIÓN DE Cz
+print("Recuperando canal Cz...")
+if 'Cz' not in epochs.ch_names:
+    # Crear canal fantasma
+    mne.add_reference_channels(epochs, ref_channels=['Cz'], copy=False)
+    # Montaje (Geometría)
+    montage = mne.channels.make_standard_montage('easycap-M1')
+    epochs.set_montage(montage, on_missing='ignore')
+    # Referencia Promedio (Aquí es donde Cz cobra vida)
+    epochs.set_eeg_reference('average', projection=True)
+    epochs.apply_proj()
+    print(">> Cz interpolado correctamente.")
+else:
+    print(">> Cz ya existía. No se han hecho cambios.")
+
+# 4. GUARDAR
+print(f"Guardando nuevo archivo: {OUTPUT_FILE.name}")
+epochs.save(OUTPUT_FILE, overwrite=True)
+print("¡Listo! Ahora usa este archivo nuevo para los siguientes scripts.")
