@@ -1,0 +1,104 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Jan 13 15:26:41 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+SCRIPT C: VISUALIZACIÓN FINAL (Ondas Bonitas)
+---------------------------------------------
+Configura tus canales y tiempos aquí para obtener la gráfica final.
+"""
+import matplotlib
+try: matplotlib.use('Qt5Agg')
+except: pass
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+# =============================================================================
+# 1. TU CONFIGURACIÓN (¡EDITA ESTO!)
+# =============================================================================
+# ¿Qué canales quieres comparar? (Basado en lo que viste en el Script B)
+# Puedes añadir o quitar grupos
+MIS_ROIS = {
+    'MMN Clasica (Frontal)': ['Fz', 'FC1', 'FC2'], 
+    'P3b Clasica (Parietal)': ['Pz', 'Cz'],
+    'Somato Izquierdo': ['C3', 'CP3'], # Para mano DERECHA
+    'Somato Derecho':   ['C4', 'CP4']  # Para mano IZQUIERDA
+}
+
+# ¿En qué ventana de tiempo quieres calcular el pico (µV)?
+VENTANA_MMN = (0.130, 0.230) # Segundos
+VENTANA_P3B = (0.350, 0.550) # Segundos
+
+# =============================================================================
+# 2. CARGA Y PROCESAMIENTO
+# =============================================================================
+BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+INPUT_FILE = BASE_PATH / "sub-P01_MMN_P3b_Stable_Cz_epo.fif"
+
+print("Cargando datos...")
+epochs = mne.read_epochs(INPUT_FILE, preload=True, verbose=False)
+
+# Calcular promedios
+l_diff = mne.combine_evoked([epochs['121'].average(), epochs[['113','114','115','116']].average()], weights=[1, -1])
+r_diff = mne.combine_evoked([epochs['221'].average(), epochs[['213','214','215','216']].average()], weights=[1, -1])
+
+# Estilos de línea
+colors = {'Standard': 'k', 'Deviant': 'r', 'Difference': 'b'}
+styles = {'Standard': '--', 'Deviant': '-', 'Difference': '-'}
+
+# =============================================================================
+# 3. GENERADOR DE GRÁFICAS
+# =============================================================================
+def plot_roi_waves(roi_name, picks, diff_wave, title_prefix):
+    """Pinta la gráfica y calcula el pico"""
+    
+    # 1. Gráfica
+    fig = mne.viz.plot_compare_evokeds(
+        {'Difference': diff_wave}, # Solo pintamos la diferencia (azul) o añade Std/Dev si quieres
+        picks=picks,
+        combine='mean', # Promedia los canales de la ROI
+        title=f"{title_prefix}: {roi_name}",
+        colors={'Difference': 'blue'},
+        invert_y=True,
+        show_sensors=False,
+        show=False
+    )
+    
+    # 2. Cálculo de Pico Numérico
+    # Extraemos los datos promediados de esos canales
+    data = diff_wave.copy().pick(picks).data.mean(axis=0)
+    times = diff_wave.times
+    
+    # Buscar pico MMN (Mínimo en ventana)
+    mask_mmn = (times >= VENTANA_MMN[0]) & (times <= VENTANA_MMN[1])
+    pico_mmn = np.min(data[mask_mmn]) * 1e6 # µV
+    
+    # Buscar pico P3b (Máximo en ventana)
+    mask_p3b = (times >= VENTANA_P3B[0]) & (times <= VENTANA_P3B[1])
+    pico_p3b = np.max(data[mask_p3b]) * 1e6 # µV
+    
+    print(f"--- {title_prefix} [{roi_name}] ---")
+    print(f"   MMN Peak: {pico_mmn:.2f} µV")
+    print(f"   P3b Peak: {pico_p3b:.2f} µV")
+
+# =============================================================================
+# 4. EJECUCIÓN
+# =============================================================================
+print("\nGenerando reportes...")
+
+for nombre, canales in MIS_ROIS.items():
+    # Gráficos Mano Izquierda
+    plot_roi_waves(nombre, canales, l_diff, "MANO IZQUIERDA")
+    
+    # Gráficos Mano Derecha
+    plot_roi_waves(nombre, canales, r_diff, "MANO DERECHA")
+
+print("\n¡Ventanas abiertas!")
+plt.show(block=True)
