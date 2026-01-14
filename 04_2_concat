@@ -1,32 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jan 13 16:46:24 2026
+Created on Wed Jan 14 14:09:51 2026
 
 @author: navar
 """
 
 # -*- coding: utf-8 -*-
 """
-SCRIPT 3A: CONCATENACIÓN Y CHECK FINAL
---------------------------------------
-1. Busca todos los archivos _epo.fif de los runs individuales.
-2. Los une en un solo archivo grande.
-3. Asegura que Cz existe y es correcto.
-4. Guarda el archivo DEFINITIVO para visualización.
+SCRIPT 3A: CONCATENACIÓN Y CHECK FINAL (FIX LLAVE MAESTRA)
+----------------------------------------------------------
+1. Busca todos los archivos _epo.fif.
+2. Aplica proyecciones.
+3. USA _unlock() para vaciar la lista de proyectores a la fuerza.
+4. Une los archivos y guarda el maestro.
 """
 import mne
 from pathlib import Path
+import contextlib # Para manejar el contexto de seguridad
 
 # =============================================================================
 # 1. CARGA Y CONCATENACIÓN
 # =============================================================================
 BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
-OUTPUT_FILE = BASE_PATH / "sub-P01_COMBINED_epo.fif" # Nombre del archivo final
+OUTPUT_FILE = BASE_PATH / "sub-P01_COMBINED_epo.fif"
 
-# Buscamos los archivos de épocas generados por el Script 2
+# Buscamos los archivos (ignorando el combinado si ya existe)
 EPO_FILES = sorted(list(BASE_PATH.glob("*_epo.fif")))
-
-# Filtramos para no cargar el archivo combinado si ya existe de antes
 EPO_FILES = [f for f in EPO_FILES if "COMBINED" not in f.name]
 
 print(f"Encontrados {len(EPO_FILES)} archivos de épocas individuales:")
@@ -35,28 +34,51 @@ epoch_list = []
 for f in EPO_FILES:
     print(f" -> Cargando: {f.name}")
     ep_temp = mne.read_epochs(f, preload=True, verbose=False)
+    
+    # --- LA LLAVE MAESTRA PARA EL ERROR DE PROYECTORES ---
+    # 1. Primero nos aseguramos de que el cambio matemático está hecho
+    if ep_temp.info['projs']:
+        ep_temp.apply_proj()
+    
+    # 2. Ahora usamos _unlock() para saltarnos la seguridad de MNE.
+    # Esto permite borrar la lista de proyectores activos sin que salte el error
+    # "Cannot remove projector that has already been applied".
+    try:
+        with ep_temp.info._unlock():
+            ep_temp.info['projs'] = []
+    except AttributeError:
+        # En versiones muy antiguas de MNE, _unlock no existe, 
+        # pero tampoco existía el bloqueo, así que esto funcionaría directo:
+        ep_temp.info['projs'] = []
+    # -----------------------------------------------------
+    
     epoch_list.append(ep_temp)
 
 if not epoch_list:
-    raise ValueError("¡No encontré archivos _epo.fif! Ejecuta el Script 2 primero.")
+    raise ValueError("¡No encontré archivos _epo.fif! Revisa la carpeta.")
 
 print("Concatenando...")
+# Ahora todos tienen projs=[], así que MNE no verá diferencias.
 epochs_all = mne.concatenate_epochs(epoch_list)
-del epoch_list # Liberamos RAM
+del epoch_list 
 
 print(f"Total épocas acumuladas: {len(epochs_all)}")
 
 # =============================================================================
 # 2. VERIFICACIÓN DE Cz
 # =============================================================================
-# Si seguiste el Script 1, Cz debería estar. Si no, esto lo arregla.
 if 'Cz' not in epochs_all.ch_names:
     print("AVISO: Cz no encontrado. Recuperándolo matemáticamente...")
     mne.add_reference_channels(epochs_all, ref_channels=['Cz'], copy=False)
     montage = mne.channels.make_standard_montage('easycap-M1')
     epochs_all.set_montage(montage, on_missing='ignore')
+    
+    # Volvemos a aplicar el truco por si acaso al recalcular
     epochs_all.set_eeg_reference('average', projection=True)
     epochs_all.apply_proj()
+    with epochs_all.info._unlock():
+        epochs_all.info['projs'] = []
+        
     print(">> Cz recuperado.")
 else:
     print(">> CHECK OK: El canal Cz existe en los datos.")
@@ -66,4 +88,4 @@ else:
 # =============================================================================
 print(f"Guardando archivo maestro: {OUTPUT_FILE.name}")
 epochs_all.save(OUTPUT_FILE, overwrite=True)
-print("¡Script 3A terminado! Ahora ejecuta el 3B para ver las gráficas.")
+print("¡Script 3A terminado! ¡Por fin! Corre al 3C (Visualización).")
