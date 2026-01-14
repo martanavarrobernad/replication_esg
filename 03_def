@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-Created on Tue Jan 13 16:22:50 2026
+Created on Wed Jan 14 11:37:30 2026
 
 @author: navar
 """
 
 # -*- coding: utf-8 -*-
 """
-SCRIPT 2: ICA y Epoching INDIVIDUAL (Run por Run)
--------------------------------------------------
-1. Busca los archivos _prepro_raw.fif (salida del Script 1).
-2. Calcula ICA individualmente (te pedirá seleccionar componentes).
-3. Aplica Gating de ECG (si existe canal ECG).
-4. Corta épocas y permite rechazo manual visual.
-5. Guarda un archivo _epo.fif por cada run.
+SCRIPT 2 MAESTRO: Limpieza Manual -> ICA -> Interpolación Final
+---------------------------------------------------------------
+1. Inspección visual: Marcas canales malos y tramos ruidosos.
+2. FIX AUTOMÁTICO: Resetea la referencia para evitar el error (60 vs 62).
+3. ICA: Calcula componentes ignorando lo malo.
+4. Epoching: Corta y limpia.
+5. INTERPOLACIÓN FINAL: Reconstruye los canales malos antes de guardar 
+   para que la concatenación (Script 3) sea perfecta.
 """
 
 import mne
@@ -25,15 +26,12 @@ from pathlib import Path
 # 1. CONFIGURACIÓN
 # =============================================================================
 BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
-
-# Buscamos los archivos generados en el Script 1
-# Patrón: cualquier cosa que termine en _prepro_raw.fif
 INPUT_FILES = sorted(list(BASE_PATH.glob("*_prepro_raw.fif")))
 
-# Escalas para visualización
+# Escalas visuales (Ajustadas para ver bien)
 VIZ_SCALINGS = dict(eeg=50e-6, eog=150e-6, misc=50e-6)
 
-# Canales EEG para el ICA (Solo cabeza)
+# Canales EEG para el ICA
 EEG_CHS = [
     'Fp1', 'Fz', 'F3', 'F7', 'FT9', 'FC5', 'FC1', 'C3', 'T7', 'TP9', 'CP5', 'CP1', 
     'Pz', 'P3', 'P7', 'O1', 'Oz', 'O2', 'P4', 'P8', 'TP10', 'CP6', 'CP2', 'C4', 
@@ -43,18 +41,15 @@ EEG_CHS = [
     'FT8', 'F6', 'AF8', 'AF4', 'F2'
 ]
 
-# Códigos de Eventos (Standard vs Deviant)
 TARGET_CODES = {
-    # Left
-    18: 111, 19: 112, 20: 113, 21: 114, 22: 115, 23: 116, 25: 121,
-    # Right
-    34: 211, 35: 212, 36: 213, 37: 214, 38: 215, 39: 216, 41: 221
+    18: 111, 19: 112, 20: 113, 21: 114, 22: 115, 23: 116, 25: 121, # Left
+    34: 211, 35: 212, 36: 213, 37: 214, 38: 215, 39: 216, 41: 221  # Right
 }
 
 # =============================================================================
-# 2. BUCLE PRINCIPAL (Itera sobre cada Run)
+# 2. BUCLE DE PROCESAMIENTO
 # =============================================================================
-print(f"Archivos encontrados para procesar: {len(INPUT_FILES)}")
+print(f"Archivos encontrados: {len(INPUT_FILES)}")
 
 for i, f_path in enumerate(INPUT_FILES):
     print(f"\n========================================")
@@ -64,92 +59,79 @@ for i, f_path in enumerate(INPUT_FILES):
     # 1. CARGA
     raw = mne.io.read_raw_fif(f_path, preload=True)
     
-    # 2. ICA (Optimizado 1Hz)
-    print("--- ICA (Interactive) ---")
-    print("Generando copia filtrada a 1Hz para detección óptima...")
-    raw_for_ica = raw.copy().filter(l_freq=1.0, h_freq=None, n_jobs=1, verbose=False, picks=EEG_CHS)
+    # 2. INSPECCIÓN VISUAL (Tú mandas aquí)
+    print("\n>>> PASO A: INSPECCIÓN VISUAL <<<")
+    print(" - Haz CLIC en los nombres de canales rotos para marcarlos como 'BAD'.")
+    print(" - Pulsa 'a' para marcar tramos de ruido (BAD_...) con el ratón.")
+    
+    raw.plot(block=True, n_channels=30, scalings=VIZ_SCALINGS, 
+             title=f"RUN {i+1}: Marca Canales Malos y Segmentos")
+    
+    # 3. FIX DE GEOMETRÍA (La solución a tu error 60 vs 62)
+    # Si has marcado canales como malos, raw.info['bads'] tendrá contenido.
+    # Necesitamos resetear la Referencia Average para que no busque los canales que acabas de matar.
+    if raw.info['bads']:
+        print(f"Detectados canales malos: {raw.info['bads']}")
+        print("Reseteando matriz de referencia para evitar errores...")
+        
+        # A) Borrar referencia vieja (la de 62 canales)
+        if raw.info['projs']: 
+            raw.del_proj()
+        
+        # B) Crear referencia nueva (con los canales que quedan vivos)
+        raw.set_eeg_reference('average', projection=True)
+        raw.apply_proj()
+        print("¡Referencia arreglada! ICA listo para ejecutarse.")
+
+    # 4. ICA
+    print("\n--- ICA (Calculando...) ---")
+    # Filtramos copia para ICA (ignorando canales malos automáticamente)
+    picks_ica = mne.pick_types(raw.info, eeg=True, exclude='bads')
+    raw_for_ica = raw.copy().filter(l_freq=1.0, h_freq=None, n_jobs=1, verbose=False, picks=picks_ica)
     
     ica = mne.preprocessing.ICA(n_components=20, random_state=97)
-    ica.fit(raw_for_ica, picks=EEG_CHS, decim=10)
+    # reject_by_annotation=True hace que el ICA no aprenda del ruido que marcaste
+    ica.fit(raw_for_ica, picks=picks_ica, decim=10, reject_by_annotation=True)
     
-    print(">> SE ABRE VENTANA ICA: Marca en ROJO el parpadeo (ICA000) y el corazón (ICA001).")
-    print(">> Cierra la ventana cuando termines para continuar.")
+    print(">> SE ABRE VENTANA ICA: Marca Ojos/Corazón.")
+    ica.plot_sources(raw_for_ica, block=True, title=f"ICA Run {i+1}")
     
-    # block=True detiene el script hasta que cierres la ventana
-    ica.plot_sources(raw_for_ica, block=True, title=f"ICA Run {i+1}: Marca Ojos/Corazón")
-    
-    print("Aplicando limpieza ICA a los datos originales...")
+    print("Aplicando limpieza...")
     raw = ica.apply(raw)
-    del raw_for_ica # Limpieza de RAM
+    del raw_for_ica
 
-    # 3. EVENTOS
-    print("--- Eventos ---")
+    # 5. EVENTOS
     events_raw, event_id_found = mne.events_from_annotations(raw, verbose=False)
-    
-    # Mapeo robusto de descripciones a números
     my_map = {}
-    for description in event_id_found.keys():
-        numbers = re.findall(r'\d+', description)
-        if numbers:
-            code_in_file = int(numbers[-1])
-            if code_in_file in TARGET_CODES:
-                my_map[description] = TARGET_CODES[code_in_file]
+    for desc in event_id_found:
+        nums = re.findall(r'\d+', desc)
+        if nums and int(nums[-1]) in TARGET_CODES:
+            my_map[desc] = TARGET_CODES[int(nums[-1])]
     
-    if not my_map:
-        print("¡ALERTA! No se encontraron eventos compatibles en este run. Saltando...")
-        continue
-
+    if not my_map: continue
     events, _ = mne.events_from_annotations(raw, event_id=my_map)
 
-    # 4. GATING ECG (Opcional pero recomendado)
-    if 'ECG' in raw.ch_names:
-        print("--- Gating ECG ---")
-        try:
-            # Detectar latidos
-            ecg_events = mne.preprocessing.find_ecg_events(raw, ch_name='ECG', verbose=False)[0]
-            
-            # Crear zona prohibida (+/- 150ms alrededor del latido)
-            sr = raw.info['sfreq']
-            win_samps = int(0.150 * sr)
-            bad_samples = set()
-            for r_peak in ecg_events[:, 0]:
-                bad_samples.update(range(r_peak - win_samps, r_peak + win_samps))
-            
-            # Filtrar eventos que caen en latido
-            n_orig = len(events)
-            events = np.array([ev for ev in events if ev[0] not in bad_samples])
-            print(f"Eventos eliminados por coincidir con latido: {n_orig - len(events)}")
-        except Exception as e:
-            print(f"Error en Gating ECG (no crítico): {e}")
-
-    # 5. EPOCHING
-    print("--- Creando Épocas ---")
+    # 6. EPOCHING
+    print("--- Epoching ---")
     epochs = mne.Epochs(
-        raw, events, event_id=None, 
-        tmin=-0.1, tmax=0.65, 
-        baseline=(-0.1, 0), 
-        preload=True, 
-        reject=None, 
-        reject_by_annotation=False,
-        verbose=False
+        raw, events, event_id=None, tmin=-0.1, tmax=0.65, 
+        baseline=(-0.1, 0), preload=True, reject=None, 
+        reject_by_annotation=True, verbose=False
     )
-    
-    # 6. RECHAZO MANUAL
-    print(">> SE ABRE VENTANA ÉPOCAS: Revisa y marca las ruidosas.")
-    print(">> Cierra la ventana para guardar y pasar al siguiente run.")
-    epochs.plot(block=True, n_epochs=4, n_channels=30, scalings=VIZ_SCALINGS, title=f"Run {i+1}: Rechazo Manual")
 
-    # 7. GUARDAR
-    # Generamos nombre: sub-P01_run01_epo.fif
-    # Usamos f_path.stem que es "sub-P01_run01_prepro_raw" y le quitamos "_prepro_raw" si queremos, o simplemente añadimos "_epo"
-    # Opción limpia: reemplazar "_prepro_raw" por "_epo"
+    # 7. INTERPOLACIÓN FINAL (El toque maestro)
+    # Ahora que ya hemos limpiado todo, recuperamos los canales malos interpolándolos.
+    # Esto asegura que todos los runs tengan 62 canales al guardarse.
+    if len(epochs.info['bads']) > 0:
+        print(f"Interpolando canales malos antes de guardar: {epochs.info['bads']}")
+        epochs.interpolate_bads(reset_bads=True, verbose=False)
+    
+    # 8. GUARDAR
     out_name = f_path.name.replace("_prepro_raw.fif", "_epo.fif")
     out_path = BASE_PATH / out_name
-    
     print(f"Guardando: {out_name}")
     epochs.save(out_path, overwrite=True)
     
-    # Liberar memoria
     del raw, epochs, ica
 
-print("\n¡PROCESO COMPLETADO! Todos los runs han sido limpiados y guardados.")
+print("\n¡PROCESO COMPLETADO! Archivos listos y compatibles para concatenar.")
