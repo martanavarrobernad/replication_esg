@@ -1,0 +1,96 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Wed Jan 14 12:55:26 2026
+
+@author: navar
+"""
+
+# -*- coding: utf-8 -*-
+"""
+SCRIPT EXTRA: ECG GATING (Limpieza de Corazón POST-PROCESADO)
+-------------------------------------------------------------
+Este script toma tus archivos _epo.fif ya procesados y elimina 
+las épocas que coinciden con un latido cardíaco, usando el archivo
+original _raw.fif para detectar los picos con precisión.
+"""
+
+import mne
+import numpy as np
+from pathlib import Path
+
+# =============================================================================
+# 1. CONFIGURACIÓN
+# =============================================================================
+BASE_PATH = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01")
+
+# Buscamos los archivos RAW (para detectar latidos) y los EPO (para limpiar)
+raw_files = sorted(list(BASE_PATH.glob("*_prepro_raw.fif")))
+
+print(f"Encontrados {len(raw_files)} runs para revisar ECG.")
+
+# =============================================================================
+# 2. BUCLE DE LIMPIEZA
+# =============================================================================
+for raw_path in raw_files:
+    # Deducimos el nombre del archivo de épocas correspondiente
+    epo_name = raw_path.name.replace("_prepro_raw.fif", "_epo.fif")
+    epo_path = BASE_PATH / epo_name
+    
+    if not epo_path.exists():
+        print(f"SALTANDO: No encuentro el archivo de épocas {epo_name}")
+        continue
+
+    print(f"\nProcesando: {epo_name}...")
+
+    # A) CARGAMOS LOS DATOS
+    # Cargamos el RAW solo para encontrar los latidos (es más preciso en continua)
+    raw = mne.io.read_raw_fif(raw_path, preload=True, verbose=False)
+    # Cargamos las ÉPOCAS que ya limpiaste con ICA
+    epochs = mne.read_epochs(epo_path, preload=True, verbose=False)
+    
+    n_inicial = len(epochs)
+
+    # B) DETECCIÓN DE LATIDOS (ECG)
+    if 'ECG' in raw.ch_names:
+        print(" -> Buscando latidos cardíacos en la señal original...")
+        try:
+            # 1. Encontrar picos R (latidos)
+            ecg_events = mne.preprocessing.find_ecg_events(raw, ch_name='ECG', verbose=False)[0]
+            
+            # 2. Definir "Zona Prohibida" (+/- 150ms alrededor del pico)
+            # Si el estímulo suena aquí, la respuesta espinal se contamina.
+            sr = raw.info['sfreq']
+            win_samps = int(0.150 * sr) # 150ms en muestras
+            
+            bad_samples = set()
+            for r_peak in ecg_events[:, 0]:
+                bad_samples.update(range(r_peak - win_samps, r_peak + win_samps))
+            
+            # C) FILTRADO
+            # Miramos cada época: ¿Su momento T=0 (el trigger) cae en zona prohibida?
+            epochs_to_drop = []
+            
+            # events[:, 0] tiene el número de muestra donde ocurrió el estímulo
+            for i, event_sample in enumerate(epochs.events[:, 0]):
+                if event_sample in bad_samples:
+                    epochs_to_drop.append(i)
+            
+            if len(epochs_to_drop) > 0:
+                print(f" -> ¡ECG Gating! Eliminando {len(epochs_to_drop)} épocas contaminadas por latido.")
+                epochs.drop(epochs_to_drop, reason='ECG_coincidence', verbose=False)
+            else:
+                print(" -> Limpio: Ningún estímulo coincidió con un latido.")
+                
+        except Exception as e:
+            print(f" -> ERROR en detección ECG: {e}")
+    else:
+        print(" -> AVISO: No se encontró canal ECG en este run. No se puede limpiar.")
+
+    # D) GUARDADO
+    if len(epochs) < n_inicial:
+        print(f" -> Guardando cambios (de {n_inicial} a {len(epochs)} épocas)...")
+        epochs.save(epo_path, overwrite=True)
+    else:
+        print(" -> No hubo cambios, no es necesario guardar.")
+
+print("\n¡ECG GATING COMPLETADO! Tus archivos _epo.fif ahora están limpios de latidos.")
