@@ -1,0 +1,95 @@
+"""
+CONFIGURACION FINAL MNE-BIDS-PIPELINE (MMN + P3b)
+-------------------------------------------------
+Sujeto: P01
+Montaje: EasyCap M1
+Limpieza: ICA usando HEOG, VEOG y ECG
+"""
+import mne
+
+# =============================================================================
+# 1. RUTAS
+# =============================================================================
+study_name = "MMN_P01_EasyCap"
+bids_root = r"C:\Users\navar\Desktop\PROYECTO_BIDS"
+deriv_root = r"C:\Users\navar\Desktop\PROYECTO_RESULTADOS"
+
+# =============================================================================
+# 2. VARIABLES BÁSICAS
+# =============================================================================
+subjects = ['01']
+task = 'mmn'
+ch_types = ['eeg']
+
+# =============================================================================
+# 3. MONTAJE Y CANALES (Clave para tus datos)
+# =============================================================================
+# Usamos el montaje oficial de tu gorro
+eeg_template_montage = mne.channels.make_standard_montage("easycap-M1")
+
+# Canales explícitos para que el ICA sepa que usar para limpiar
+eog_channels = ['HEOG', 'VEOG']
+ecg_channels = ['ECG'] 
+
+# =============================================================================
+# 4. PREPROCESADO
+# =============================================================================
+l_freq = 0.1
+h_freq = None
+notch_freq = 50.0
+
+decode = True
+decoding_time_generalization = True
+decoding_time_generalization_decim = 2
+
+# Correccion de nombre variable (nueva version de MNE)
+raw_resample_sfreq = 128.0 
+
+# ICA Automatico (Limpiara parpadeos y latidos)
+spatial_filter = "ica"
+ica_algorithm = 'fastica'
+ica_reject = dict(eeg=400e-6, eog=500e-6)
+reject = "autoreject_global"
+ica_max_iterations = 1000
+ica_eog_threshold = 2
+ica_decim = 2  # speed up ICA fitting
+
+run_source_estimation = False
+on_rename_missing_events = "ignore"
+
+n_jobs = 1
+# =============================================================================
+# 5. CONDICIONES (Lectura directa de lo generado en Script 1)
+# =============================================================================
+conditions = [
+    'Standard/Left', 
+    'Deviant/Left', 
+    'Standard/Right', 
+    'Deviant/Right'
+]
+
+# =============================================================================
+# 6. CONTRASTES (La Resta: Deviant - Standard)
+# =============================================================================
+contrasts = [
+    ('Deviant/Left', 'Standard/Left'),
+    ('Deviant/Right', 'Standard/Right')
+]
+
+# =============================================================================
+# 7. EPOCAS (Ventana Larga para ver MMN + P3b)
+# =============================================================================
+epochs_tmin = -0.1
+epochs_tmax = 0.65
+baseline = (None, 0)
+
+# Rechazo de artefactos brutos (>400uV)
+reject = dict(eeg=400e-6)
+
+decode = False
+
+run_source_estimation = False
+# =============================================================================
+# 8. REPORTE (Solo graficar canales cerebrales clave)
+# =============================================================================
+#analyze_channels = ['Fz', 'Cz', 'Pz', 'C3', 'C4']
