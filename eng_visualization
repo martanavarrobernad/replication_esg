@@ -1,0 +1,167 @@
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+import gc
+
+# =============================================================================
+# 1. CONFIGURACIÓN
+# =============================================================================
+data_dir = Path(r"C:\Users\navar\Desktop\sub-P01\sub-P01") 
+
+# Mapeo Completo
+EVENT_DICT_MAPPING = {
+    # LEFT Stimuli
+    "Stimulus/S 18": 111, "Stimulus/S 19": 112, "Stimulus/S 20": 113,
+    "Stimulus/S 21": 114, "Stimulus/S 22": 115, "Stimulus/S 23": 116,
+    "Stimulus/S 25": 121,
+    # RIGHT Stimuli
+    "Stimulus/S 34": 211, "Stimulus/S 35": 212, "Stimulus/S 36": 213,
+    "Stimulus/S 37": 214, "Stimulus/S 38": 215, "Stimulus/S 39": 216,
+    "Stimulus/S 41": 221
+}
+
+# --- PARÁMETROS EXACTOS DEL PAPER ---
+INTERPOL_WIN_SEC = (-0.0015, 0.004) 
+BP_FREQ    = (30, 400)
+NOTCH_FREQ = 50 
+NOTCH_WIDTH = 5 
+BASELINE_WIN = (-0.110, -0.010)
+
+# =============================================================================
+# FUNCIÓN AUXILIAR DE INTERPOLACIÓN
+# =============================================================================
+def interpolate_artifact(inst, events, t_min, t_max):
+    sfreq = inst.info['sfreq']
+    data = inst._data
+    s_min = int(t_min * sfreq)
+    s_max = int(t_max * sfreq)
+    for event_samp in events[:, 0]:
+        start = event_samp + s_min
+        end   = event_samp + s_max
+        if start < 0 or end >= data.shape[1]: continue
+        for ch in range(data.shape[0]):
+            val_start = data[ch, start]
+            val_end   = data[ch, end]
+            data[ch, start:end] = np.linspace(val_start, val_end, end-start)
+    return inst
+
+# =============================================================================
+# 2. PROCESAMIENTO
+# =============================================================================
+vhdr_files = sorted(list(data_dir.glob("*Run*.vhdr")))
+if not vhdr_files:
+    print("❌ Error: No se encontraron archivos .vhdr")
+    exit()
+
+print(f"🔬 Procesando {len(vhdr_files)} runs (Solo Axila)...")
+
+raw_left_list  = []
+raw_right_list = []
+proc_left_list = []
+proc_right_list = []
+
+for vhdr_file in vhdr_files:
+    try:
+        raw = mne.io.read_raw_brainvision(vhdr_file, preload=True, verbose=False)
+        if 'ENG_AXILLA' in raw.ch_names:
+            mne.set_bipolar_reference(raw, anode=['ENG_AXILLA'], cathode=['ENG_AXILLA_REF'], 
+                                      ch_name=['Axila'], drop_refs=True, copy=False, verbose=False)
+            raw.pick_channels(['Axila'])
+            raw.set_channel_types({'Axila': 'eeg'})
+        else:
+            continue 
+
+        events, event_ids = mne.events_from_annotations(raw, verbose=False)
+        inv_map = {v: k for k, v in event_ids.items()}
+        events_mapped = []
+        for s, p, c in events:
+            desc = inv_map.get(c)
+            if desc in EVENT_DICT_MAPPING:
+                events_mapped.append([s, 0, EVENT_DICT_MAPPING[desc]])
+        events_mapped = np.array(events_mapped)
+        if len(events_mapped) == 0: continue
+
+        # --- RAMA A: RAW ---
+        raw_copy = raw.copy()
+        raw_copy.filter(1, None, verbose=False) 
+        epochs_raw = mne.Epochs(raw_copy, events_mapped, tmin=-0.010, tmax=0.030,
+                                baseline=None, verbose=False)
+        idx_l = [i for i, c in enumerate(epochs_raw.events[:, 2]) if 100 <= c < 200]
+        if len(idx_l) > 0: raw_left_list.append(epochs_raw[idx_l].average())
+        idx_r = [i for i, c in enumerate(epochs_raw.events[:, 2]) if 200 <= c < 300]
+        if len(idx_r) > 0: raw_right_list.append(epochs_raw[idx_r].average())
+        del raw_copy, epochs_raw
+
+        # --- RAMA B: PROCESADO ---
+        interpolate_artifact(raw, events_mapped, INTERPOL_WIN_SEC[0], INTERPOL_WIN_SEC[1])
+        raw.resample(1000, verbose=False)
+        events_proc, ids_proc = mne.events_from_annotations(raw, verbose=False)
+        inv_map_proc = {v: k for k, v in ids_proc.items()}
+        events_mapped_proc = []
+        for s, p, c in events_proc:
+            desc = inv_map_proc.get(c)
+            if desc in EVENT_DICT_MAPPING:
+                events_mapped_proc.append([s, 0, EVENT_DICT_MAPPING[desc]])
+        events_mapped_proc = np.array(events_mapped_proc)
+        raw.filter(l_freq=BP_FREQ[0], h_freq=BP_FREQ[1], method='iir', 
+                   iir_params=dict(order=4, ftype='butter'), verbose=False)
+        raw.notch_filter(freqs=NOTCH_FREQ, notch_widths=NOTCH_WIDTH, verbose=False)
+        epochs_proc = mne.Epochs(raw, events_mapped_proc, tmin=-0.200, tmax=0.600,
+                                 baseline=BASELINE_WIN, verbose=False)
+        idx_l_proc = [i for i, c in enumerate(epochs_proc.events[:, 2]) if 100 <= c < 200]
+        if len(idx_l_proc) > 0: proc_left_list.append(epochs_proc[idx_l_proc].average())
+        idx_r_proc = [i for i, c in enumerate(epochs_proc.events[:, 2]) if 200 <= c < 300]
+        if len(idx_r_proc) > 0: proc_right_list.append(epochs_proc[idx_r_proc].average())
+        del raw, epochs_proc
+        gc.collect()
+
+    except Exception as e:
+        print(f"⚠️ Error en archivo {vhdr_file.name}: {e}")
+        continue
+
+# =============================================================================
+# 3. VISUALIZACIÓN
+# =============================================================================
+if not proc_left_list:
+    print("❌ No se generaron datos.")
+    exit()
+
+print("📊 Generando gráfica PLOS Biology...")
+ga_raw_L  = mne.combine_evoked(raw_left_list, weights='nave')
+ga_raw_R  = mne.combine_evoked(raw_right_list, weights='nave')
+ga_proc_L = mne.combine_evoked(proc_left_list, weights='nave')
+ga_proc_R = mne.combine_evoked(proc_right_list, weights='nave')
+t_raw = ga_raw_L.times * 1000
+t_proc = ga_proc_L.times * 1000
+
+fig, axes = plt.subplots(2, 1, figsize=(9, 10))
+
+# --- PANEL A ---
+ax1 = axes[0]
+y_raw_L = ga_raw_L.get_data(picks='Axila')[0] * 1e6
+y_raw_R = ga_raw_R.get_data(picks='Axila')[0] * 1e6
+ax1.plot(t_raw, y_raw_L, color='k', linewidth=1.5, label='Raw (Izquierda)')
+ax1.plot(t_raw, y_raw_R, color='gray', linestyle='--', linewidth=1.5, label='Raw (Derecha)')
+ax1.set_title("A. Señal Cruda: Artefacto de Estimulación (t=0)", fontsize=12, fontweight='bold')
+ax1.set_ylabel("Amplitud (µV)")
+ax1.set_xlim([-5, 25])
+ax1.grid(True, alpha=0.3)
+ax1.legend()
+ax1.axvspan(INTERPOL_WIN_SEC[0]*1000, INTERPOL_WIN_SEC[1]*1000, color='red', alpha=0.2, label='Ventana a Interpolar')
+
+# --- PANEL B ---
+ax2 = axes[1]
+y_proc_L = ga_proc_L.get_data(picks='Axila')[0] * 1e6
+y_proc_R = ga_proc_R.get_data(picks='Axila')[0] * 1e6
+ax2.plot(t_proc, y_proc_L, color='#0055A4', linewidth=2.5, label='Estim. IZQUIERDA (Señal)')
+ax2.plot(t_proc, y_proc_R, color='#E30613', linestyle=':', linewidth=2, label='Estim. DERECHA (Control)')
+ax2.set_title("B. Señal Procesada (Paper Nierula et al., 2024)\nInterpolación -1.5 a 4ms + Filtro 30-400 Hz", fontsize=12, fontweight='bold')
+ax2.set_xlabel("Tiempo (ms)")
+ax2.set_ylabel("Amplitud (µV)")
+ax2.set_xlim([-10, 60])
+ax2.grid(True, alpha=0.3)
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
