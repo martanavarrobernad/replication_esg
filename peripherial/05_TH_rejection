@@ -1,0 +1,62 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 26 16:22:57 2026
+
+@author: marta.navarrobernad
+"""
+
+import mne
+from pathlib import Path
+import gc
+
+# =============================================================================
+# STEP 4: THRESHOLD REJECTION (PERIPHERAL SSEP)
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+# Umbral sugerido para periféricos: 100 microvoltios
+# Si tus datos están muy limpios, puedes bajarlo a 80. Si hay mucho ruido, 150.
+REJECT_THRESHOLD = 100e-6  # 150 µV
+
+def apply_threshold_rejection():
+    # Buscamos los archivos que pasaron por el Gating
+    input_files = sorted(list(SUBJECT_DIR.glob("*_PERIPH_GATED-epo.fif")))
+    
+    if not input_files:
+        print("[-] No se encontraron archivos GATED para aplicar umbral.")
+        return
+
+    print(f"--- INICIANDO RECHAZO POR UMBRAL ({REJECT_THRESHOLD*1e6:.0f} µV) ---")
+
+    for f_path in input_files:
+        print(f"\n>> Analizando: {f_path.name}")
+        
+        # 1. Cargar épocas
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        n_before = len(epochs)
+        
+        # 2. Aplicar rechazo
+        # drop_bad() usa el diccionario reject para limpiar
+        reject = dict(eeg=REJECT_THRESHOLD)
+        epochs.drop_bad(reject=reject, verbose=False)
+        
+        n_after = len(epochs)
+        dropped = n_before - n_after
+        
+        if n_before > 0:
+            pct = (dropped / n_before) * 100
+            print(f"   -> Umbral: Eliminadas {dropped} épocas ({pct:.2f}%)")
+            print(f"   -> Restantes: {n_after} épocas de alta calidad.")
+        
+        # 3. Guardar versión final (Clean)
+        out_name = f"{f_path.name.replace('-epo.fif', '')}_CLEAN-epo.fif"
+        epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=False)
+        
+        del epochs
+        gc.collect()
+
+    print("\n--- PROCESO COMPLETADO: Datos periféricos limpios de artefactos ---")
+
+if __name__ == "__main__":
+    apply_threshold_rejection()
