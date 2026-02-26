@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 26 15:42:03 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 26 2026
+@author: marta.navarrobernad
+PCHIP Interpolation - PERIPHERAL ONLY (ERB & AXILLA)
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import mne
+import matplotlib.pyplot as plt
+from scipy.interpolate import PchipInterpolator
+import gc
+
+# Configuración de rutas
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+# Archivos CSV de tiempos (Solo Periferia)
+CSV_FILES = {
+    'ERB': SUBJECT_DIR / "tiempos_artefacto_ERB.csv",
+    'AXILLA': SUBJECT_DIR / "tiempos_artefacto_AXILLA.csv"
+}
+
+# Canales a procesar
+CHANNELS_PERIPHERAL = {
+    'ERB': ["ENG_ERB", "ENG_ERB_REF"],
+    'AXILLA': ["ENG_AXILLA", "ENG_AXILLA_REF"]
+}
+
+N_PAD = 5 # Puntos de anclaje para la curva
+
+# =============================================================================
+# FUNCIONES
+# =============================================================================
+
+def apply_pchip(raw, onsets_sec, start_ms, end_ms, picks, n_pad=5):
+    sf = raw.info["sfreq"]
+    data = raw._data 
+    ch_indices = [raw.ch_names.index(ch) for ch in picks if ch in raw.ch_names]
+    
+    if not ch_indices: return
+
+    s0 = int(round(start_ms / 1000 * sf))
+    s1 = int(round(end_ms / 1000 * sf))
+    x_interp_rel = np.arange(s0, s1 + 1)
+
+    for ons in onsets_sec:
+        idx_stim = int(round(ons * sf))
+        i0, i1 = idx_stim + s0, idx_stim + s1
+        
+        if i0 - n_pad < 0 or i1 + n_pad >= data.shape[1]:
+            continue
+
+        x_known_abs = idx_stim + np.concatenate([np.arange(s0 - n_pad, s0), 
+                                                np.arange(s1 + 1, s1 + 1 + n_pad)])
+        x_interp_abs = idx_stim + x_interp_rel
+
+        for ch in ch_indices:
+            y_known = data[ch, x_known_abs]
+            f = PchipInterpolator(x_known_abs, y_known)
+            data[ch, x_interp_abs] = f(x_interp_abs)
+
+def plot_verification(t_ms, before, after, run_name, ch_label):
+    plt.ioff()
+    fig, ax = plt.subplots(figsize=(10, 4))
+    ax.plot(t_ms, before * 1e6, color='gray', alpha=0.5, label='Original (with Artifact)')
+    ax.plot(t_ms, after * 1e6, color='blue', lw=1.5, label='PCHIP Cleaned')
+    ax.set_title(f"Peripheral Verification {ch_label} - {run_name}")
+    ax.set_ylabel("µV")
+    ax.legend()
+    plt.savefig(SUBJECT_DIR / f"Verification_{ch_label}_{run_name.replace('.vhdr','')}.png")
+    plt.close(fig)
+
+# =============================================================================
+# PROCESAMIENTO
+# =============================================================================
+
+def main():
+    # Cargar CSVs
+    timings = {}
+    for key, path in CSV_FILES.items():
+        if path.exists():
+            timings[key] = pd.read_csv(path).set_index('run')
+            print(f"[+] CSV cargado para {key}")
+        else:
+            print(f"[-] No se encontró CSV para {key}. Se saltará este nervio.")
+
+    if not timings:
+        print("[-] No hay datos de tiempos para procesar. Abortando.")
+        return
+
+    # Archivos .vhdr originales
+    vhdr_files = sorted([f for f in SUBJECT_DIR.glob("*.vhdr") 
+                         if "Run" in f.name 
+                         and "NoStimArtifact" not in f.name 
+                         and "Combined" not in f.name
+                         and "Ref" not in f.name])
+
+    for vhdr_path in vhdr_files:
+        print(f"\n--- Processing Peripheral Artifacts: {vhdr_path.name} ---")
+        
+        raw = mne.io.read_raw_brainvision(vhdr_path, preload=True, verbose=False)
+        raw._data = raw._data.astype(np.float32)
+
+        events, event_id = mne.events_from_annotations(raw, verbose=False)
+        stim_codes = [v for k, v in event_id.items() if "Stimulus/S" in k]
+        onsets = events[np.isin(events[:, 2], stim_codes)][:, 0] / raw.info["sfreq"]
+
+        # Aplicar a cada grupo periférico
+        for group in ['ERB', 'AXILLA']:
+            if group in timings and vhdr_path.name in timings[group].index:
+                t = timings[group].loc[vhdr_path.name]
+                chs = [ch for ch in CHANNELS_PERIPHERAL[group] if ch in raw.ch_names]
+                
+                if chs:
+                    print(f"  -> Cleaning {group} ({chs}) | Window: {t['start_ms']:.2f} to {t['end_ms']:.2f} ms")
+                    
+                    # Verificación (canal activo)
+                    epochs_pre = mne.Epochs(raw, events, tmin=-0.005, tmax=0.015, picks=chs[0], baseline=None, preload=True, verbose=False)
+                    before_avg = epochs_pre.average().data[0]
+                    t_ms = epochs_pre.times * 1000
+                    
+                    apply_pchip(raw, onsets, t['start_ms'], t['end_ms'], chs, N_PAD)
+                    
+                    epochs_post = mne.Epochs(raw, events, tmin=-0.005, tmax=0.015, picks=chs[0], baseline=None, preload=True, verbose=False)
+                    after_avg = epochs_post.average().data[0]
+                    plot_verification(t_ms, before_avg, after_avg, vhdr_path.name, group)
+
+        # Guardar archivo limpio
+        out_vhdr = SUBJECT_DIR / f"{vhdr_path.stem}_NoStimArtifact.vhdr"
+        mne.export.export_raw(out_vhdr, raw, fmt="brainvision", overwrite=True)
+        print(f"  [DONE] Saved: {out_vhdr.name}")
+        
+        del raw
+        gc.collect()
+
+if __name__ == "__main__":
+    main()
