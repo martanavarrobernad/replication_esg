@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+STEP 3: ECG GATING PERIFÉRICO (REUPERANDO CANAL ECG)
+- Recupera el canal 'ECG' del archivo original .vhdr.
+- Detecta QRS y elimina épocas (+/- 150ms).
+"""
+
+from pathlib import Path
+import mne
+import numpy as np
+import re
+import gc
+
+# Configuración de rutas
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+TMIN, TMAX = -0.020, 0.060  
+BASELINE = (-0.020, -0.005) 
+SUFFIX = "_PERIPH_GATED"
+
+BLOCK_TRIGGERS = {
+    1: {"Std1": 161, "Std2": 164, "Std3_LS_GS": 165, "Dev1": 185, "Dev2": 188, "Dev3_LD_GD": 125},
+    2: {"Std1": 169, "Std2": 172, "Std3_LD_GS": 109, "Dev1": 177, "Dev2": 180, "Dev3_LS_GD": 181},
+    3: {"Std1": 105, "Std2": 108, "Std3_LD_GS": 173, "Dev1": 113, "Dev2": 116, "Dev3_LS_GD": 117},
+    4: {"Std1": 97,  "Std2": 100, "Std3_LS_GS": 101, "Dev1": 121, "Dev2": 124, "Dev3_LD_GD": 189},
+    5: {"Std1": 73,  "Std2": 76,  "Std3_LD_GS": 141, "Dev1": 81,  "Dev2": 84,  "Dev3_LS_GD": 85},
+    6: {"Std1": 137, "Std2": 140, "Std3_LD_GS": 77,  "Dev1": 145, "Dev2": 148, "Dev3_LS_GD": 149},
+    7: {"Std1": 129, "Std2": 132, "Std3_LS_GS": 133, "Dev1": 153, "Dev2": 156, "Dev3_LD_GD": 93},
+    8: {"Std1": 65,  "Std2": 68,  "Std3_LS_GS": 69,  "Dev1": 89,  "Dev2": 92,  "Dev3_LD_GD": 157}
+}
+
+def run_peripheral_gating_recovery():
+    # Buscamos los procesados PolB
+    input_files = sorted(list(SUBJECT_DIR.glob("*_PERIPH_PolB.fif")))
+    
+    if not input_files:
+        print("ERROR: No hay archivos PolB.")
+        return
+
+    for f_path in input_files:
+        match = re.search(r'Run(\d+)', f_path.name)
+        if not match: continue
+        run_idx = int(match.group(1))
+        
+        # 1. Buscar el archivo ORIGINAL (.vhdr) para sacar el ECG
+        # Buscamos archivos que tengan 'RunX' pero que NO sean los procesados
+        orig_vhdr = sorted([f for f in SUBJECT_DIR.glob(f"*Run{run_idx}*.vhdr") 
+                           if "NoStimArtifact" not in f.name and "Rest" not in f.name])
+        
+        if not orig_vhdr:
+            print(f"[-] No se encontró original para Run {run_idx}. Saltando.")
+            continue
+            
+        print(f"\n>> Procesando {f_path.name} (Recuperando ECG de {orig_vhdr[0].name})")
+
+        try:
+            # Cargar procesado y original
+            raw_proc = mne.io.read_raw_fif(f_path, preload=True, verbose=False)
+            raw_orig = mne.io.read_raw_brainvision(orig_vhdr[0], preload=True, verbose=False)
+            
+            if 'ECG' not in raw_orig.ch_names:
+                print(f"   [!] Error: Canal 'ECG' no existe ni en el original.")
+                continue
+
+            # Añadir canal ECG al raw procesado
+            ecg_data = raw_orig.get_data(picks='ECG')
+            info_ecg = mne.create_info(['ECG'], raw_proc.info['sfreq'], ['ecg'])
+            raw_ecg = mne.io.RawArray(ecg_data, info_ecg, first_samp=raw_proc.first_samp)
+            
+            raw_proc.add_channels([raw_ecg], force_update_info=True)
+            
+            # 2. EPOCHING
+            events, _ = mne.events_from_annotations(raw_proc, verbose=False)
+            target_dict = BLOCK_TRIGGERS[run_idx]
+            current_id = {k: v for k, v in target_dict.items() if v in events[:, 2]}
+            
+            epochs = mne.Epochs(raw_proc, events, event_id=current_id, 
+                                tmin=TMIN, tmax=TMAX, baseline=BASELINE, 
+                                preload=True, verbose=False)
+            
+            # 3. GATING
+            ecg_events, _, _ = mne.preprocessing.find_ecg_events(raw_proc, ch_name='ECG', verbose=False)
+            sr = raw_proc.info['sfreq']
+            win_samps = int(0.150 * sr)
+            
+            bad_samples = set()
+            for r_peak in ecg_events[:, 0]:
+                bad_samples.update(range(r_peak - win_samps, r_peak + win_samps))
+            
+            epochs_to_drop = [i for i, smp in enumerate(epochs.events[:, 0]) if smp in bad_samples]
+            
+            if epochs_to_drop:
+                print(f"   -> ECG Gating: Eliminando {len(epochs_to_drop)} épocas.")
+                epochs.drop(epochs_to_drop, reason='ECG_coincidence', verbose=False)
+
+            # 4. GUARDAR
+            out_name = f"{f_path.stem}{SUFFIX}-epo.fif"
+            epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=False)
+            print(f"   -> Guardado: {out_name}")
+
+            del raw_proc, raw_orig, epochs
+            gc.collect()
+
+        except Exception as e:
+            print(f"   !!! ERROR: {e}")
+
+if __name__ == "__main__":
+    run_peripheral_gating_recovery()
