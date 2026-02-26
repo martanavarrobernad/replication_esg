@@ -1,0 +1,148 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Thu Feb 26 2026
+@author: marta.navarrobernad
+
+Interactive selection of artifact window for Peripheral ENG (Erb & Axilla).
+EXCLUDES already processed files (_NoStimArtifact, _Ref, etc.)
+"""
+
+from pathlib import Path
+import sys
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import mne
+
+# =============================================================================
+# CONFIGURACIÓN DE RUTAS Y CANALES
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+OUT_CSV_ERB = SUBJECT_DIR / "tiempos_artefacto_ERB.csv"
+OUT_CSV_AXI = SUBJECT_DIR / "tiempos_artefacto_AXILLA.csv"
+
+# Canales periféricos
+CH_ERB = ["ENG_ERB", "ENG_ERB_REF"]
+CH_AXI = ["ENG_AXILLA", "ENG_AXILLA_REF"]
+
+# Ventana de inspección (ms)
+EPOCH_VIEW_MS = (-10.0, 15.0)
+
+# Triggers
+TRIG_IZQ = [109, 125, 101, 117, 105, 108, 113, 116, 97, 100, 121, 124, 73, 76, 81, 84, 85, 77, 93, 65, 68, 69, 89, 92]
+TRIG_DER = [173, 189, 165, 181, 161, 164, 185, 188, 169, 172, 177, 180, 141, 137, 140, 145, 148, 149, 129, 132, 133, 153, 156, 157]
+
+# =============================================================================
+# BACKEND SETUP
+# =============================================================================
+try:
+    plt.switch_backend('QtAgg')
+except:
+    pass
+
+# =============================================================================
+# FUNCIONES
+# =============================================================================
+
+def ginput_artifact(t_ms, y_izq, y_der, subject_label, ch_type):
+    plt.ion()
+    fig, ax = plt.subplots(figsize=(10, 5))
+    
+    if y_izq is not None:
+        ax.plot(t_ms, y_izq, lw=1.2, color='blue', label=f"Left {ch_type} Avg")
+    if y_der is not None:
+        ax.plot(t_ms, y_der, lw=1.2, color='green', label=f"Right {ch_type} Avg", alpha=0.7)
+        
+    ax.axvline(0, color="r", ls="--", label="Stimulus Onset")
+    ax.set_title(f"{ch_type} - {subject_label}\nClick START and END of artifact spike")
+    ax.set_xlabel("Time (ms)")
+    ax.set_ylabel("Amplitude (µV)")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.show()
+
+    pts = plt.ginput(2, timeout=-1)
+    plt.close(fig)
+    
+    if not pts or len(pts) < 2:
+        return None, None
+    xs = sorted(p[0] for p in pts)
+    return xs[0], xs[1]
+
+def process_peripheral(ch_list, ch_label, out_csv):
+    # FILTRO ESTRICTO: Solo .vhdr que tengan 'Run' pero NO tengan 'Artifact', 'Ref', 'Combined' o 'Rest'
+    vhdr_files = sorted([
+        f for f in SUBJECT_DIR.glob("*.vhdr") 
+        if "Run" in f.name 
+        and "Rest" not in f.name 
+        and "Artifact" not in f.name 
+        and "Ref" not in f.name 
+        and "Combined" not in f.name
+    ])
+    
+    if not vhdr_files:
+        print(f"[-] No se encontraron archivos ORIGINALES para {ch_label}.")
+        return
+
+    rows = []
+    for vhdr in vhdr_files:
+        print(f"\n[+] Analizando {ch_label} en ARCHIVO ORIGINAL: {vhdr.name}")
+        raw = mne.io.read_raw_brainvision(vhdr, preload=True, verbose=False)
+        events, event_id = mne.events_from_annotations(raw, verbose=False)
+        
+        present_chs = [ch for ch in ch_list if ch in raw.ch_names]
+        if not present_chs:
+            print(f"  -> Canales {ch_list} no encontrados. Saltando.")
+            continue
+
+        sf = raw.info["sfreq"]
+        s0, s1 = int(round(EPOCH_VIEW_MS[0]/1000*sf)), int(round(EPOCH_VIEW_MS[1]/1000*sf))
+        win_len = s1 - s0 + 1
+        t_ms = np.arange(win_len) / sf * 1000 + EPOCH_VIEW_MS[0]
+
+        def get_avg(trigger_list):
+            valid_names = []
+            for t in trigger_list:
+                m1, m2 = f"Stimulus/S{t}", f"Stimulus/S {t}"
+                if m1 in event_id: valid_names.append(m1)
+                if m2 in event_id: valid_names.append(m2)
+            
+            if not valid_names: return None
+            codes = [event_id[name] for name in valid_names]
+            stim_evs = events[np.isin(events[:, 2], codes)]
+            
+            avg_sum = np.zeros(win_len)
+            count = 0
+            for ev in stim_evs[:, 0]:
+                i0, i1 = ev + s0, ev + s1
+                if 0 <= i0 and i1 < raw.n_times:
+                    seg = raw.get_data(picks=present_chs, start=i0, stop=i1+1)
+                    avg_sum += seg.mean(axis=0) * 1e6
+                    count += 1
+            return avg_sum / count if count > 0 else None
+
+        y_izq = get_avg(TRIG_IZQ)
+        y_der = get_avg(TRIG_DER)
+
+        if y_izq is None and y_der is None:
+            continue
+
+        start_ms, end_ms = ginput_artifact(t_ms, y_izq, y_der, vhdr.name, ch_label)
+        
+        if start_ms is not None:
+            rows.append({"run": vhdr.name, "start_ms": start_ms, "end_ms": end_ms})
+
+    if rows:
+        df = pd.DataFrame(rows)
+        df.to_csv(out_csv, index=False, float_format="%.6f")
+        print(f"--- RESULTADOS {ch_label} GUARDADOS: {out_csv.name} ---")
+
+def main():
+    if not SUBJECT_DIR.exists():
+        print(f"Directorio no encontrado: {SUBJECT_DIR}")
+        return
+    process_peripheral(CH_ERB, "ERB", OUT_CSV_ERB)
+    process_peripheral(CH_AXI, "AXILLA", OUT_CSV_AXI)
+
+if __name__ == "__main__":
+    main()
