@@ -1,0 +1,93 @@
+import mne
+import matplotlib.pyplot as plt
+from pathlib import Path
+import matplotlib.ticker as ticker
+import gc
+
+# =============================================================================
+# REPLICACIÓN NIERULA: 4 VENTANAS (GRIS) CON ESCALA IDÉNTICA
+# =============================================================================
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+TEMP_DIR = BASE_DIR / "TEMP_CHUNKS"
+
+# Fuentes de datos
+PERIPH_FILES = sorted(list(BASE_DIR.glob("*_CLEAN-epo.fif")))
+SPINAL_FILES = sorted(list(TEMP_DIR.glob("*.fif")))
+
+NIERULA_GRAY = "#808080"
+TMIN_PLOT, TMAX_PLOT = -0.010, 0.045 # ms
+Y_LIMIT = (-5, 5) # ESCALA FIJA PARA TODOS (µV)
+
+def get_weighted_evoked(file_list):
+    """Carga, filtra 30-400Hz y promedia pesando por épocas."""
+    all_evokeds = []
+    for f in file_list:
+        epochs = mne.read_epochs(f, preload=True, verbose=False)
+        epochs.event_id = {'Total': 1}
+        epochs.events[:, 2] = 1
+        
+        # Filtro Nierula 30-400 Hz
+        epochs.filter(l_freq=30, h_freq=400, method='iir', 
+                      iir_params=dict(order=4, ftype='butter'), 
+                      phase='zero', verbose=False)
+        
+        all_evokeds.append(epochs.average())
+        del epochs
+        gc.collect()
+    
+    return mne.combine_evoked(all_evokeds, weights='nave')
+
+def plot_nierula_comparison():
+    print("[+] Cargando periféricos (Axilla/Erb)...")
+    ev_periph = get_weighted_evoked(PERIPH_FILES)
+    
+    print("[+] Cargando espinales (SC6/SC1)...")
+    ev_spinal = get_weighted_evoked(SPINAL_FILES)
+
+    # Definición de objetivos (Canal : Fuente)
+    targets = [
+        ('ENG_AXILLA', ev_periph),
+        ('ENG_ERB',    ev_periph),
+        ('SC6',        ev_spinal),
+        ('SC1',        ev_spinal)
+    ]
+
+    for ch_name, source in targets:
+        if ch_name in source.ch_names:
+            # Crear ventana independiente
+            fig, ax = plt.subplots(figsize=(6, 5), num=f"Nierula Style: {ch_name}")
+            
+            # Preparar datos con baseline local
+            ev_plot = source.copy().crop(TMIN_PLOT, TMAX_PLOT).apply_baseline((-0.010, 0))
+            data = ev_plot.pick(ch_name).data[0] * 1e6
+            times = ev_plot.times * 1000
+            
+            # Dibujo en gris profesional
+            ax.plot(times, data, color=NIERULA_GRAY, lw=2.5)
+            
+            # Guías visuales mínimas (Estímulo y Base)
+            ax.axvline(0, color='black', lw=1.5, linestyle='-')
+            ax.axhline(0, color='black', lw=0.5, alpha=0.5)
+            
+            # FORZAR EJES IDÉNTICOS
+            ax.set_xlim(TMIN_PLOT*1000, TMAX_PLOT*1000)
+            ax.set_ylim(Y_LIMIT)
+            
+            # Forzar ticks de 1 en 1 para evitar escalas tipo "1.2k"
+            ax.yaxis.set_major_locator(ticker.MultipleLocator(1.0))
+            
+            # Formato estético
+            ax.set_title(f"Channel: {ch_name}", fontweight='bold', pad=15)
+            ax.set_xlabel("Time (ms)")
+            ax.set_ylabel("Amplitude (µV)")
+            ax.grid(True, alpha=0.1, linestyle='--')
+            
+            plt.tight_layout()
+        else:
+            print(f"[-] Canal {ch_name} no encontrado en su fuente.")
+
+    print(f"[OK] Generadas 4 ventanas con escala fija {Y_LIMIT} µV.")
+    plt.show()
+
+if __name__ == "__main__":
+    plot_nierula_comparison()
