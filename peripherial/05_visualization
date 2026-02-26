@@ -1,0 +1,75 @@
+import mne
+import matplotlib.pyplot as plt
+from pathlib import Path
+import numpy as np
+
+# Configuración de rutas
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+def plot_total_grand_average_filtered():
+    # 1. Cargar todas las épocas que pasaron el filtro CLEAN
+    clean_files = sorted(list(SUBJECT_DIR.glob("*_CLEAN-epo.fif")))
+    
+    if not clean_files:
+        print("[-] No se encontraron archivos CLEAN.")
+        return
+
+    print(f"[+] Unificando {len(clean_files)} archivos para el promedio global...")
+    
+    all_epochs_list = []
+    for f in clean_files:
+        epochs = mne.read_epochs(f, preload=True, verbose=False)
+        
+        # Unificamos IDs para evitar conflictos entre bloques
+        epochs.event_id = {'Stimulus': 1}
+        epochs.events[:, 2] = 1 
+        
+        # APLICAR FILTRO ESPECÍFICO DE VISUALIZACIÓN (30-400 Hz)
+        # Se aplica a las épocas antes de promediar
+        epochs.filter(l_freq=30, h_freq=400, method='iir', 
+                      iir_params=dict(order=4, ftype='butter'), 
+                      phase='zero', verbose=False)
+        
+        all_epochs_list.append(epochs)
+
+    # Concatenación total
+    epochs_total = mne.concatenate_epochs(all_epochs_list)
+    evoked_global = epochs_total.average()
+
+    # 2. Visualización
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    
+    target_channels = [
+        {'name': 'ENG_AXILLA', 'color': 'forestgreen'},
+        {'name': 'ENG_ERB', 'color': 'darkblue'}
+    ]
+
+    for i, ch_info in enumerate(target_channels):
+        ch_name = ch_info['name']
+        if ch_name in evoked_global.ch_names:
+            idx = evoked_global.ch_names.index(ch_name)
+            data = evoked_global.data[idx] * 1e6  # Convertir a µV
+            times = evoked_global.times * 1000   # Convertir a ms
+            
+            # Dibujar la señal filtrada
+            axes[i].plot(times, data, color=ch_info['color'], lw=2, label=f"{ch_name} (30-400 Hz)")
+            
+            # Ejes de referencia
+            axes[i].axvline(0, color='black', lw=1.5, label='Estímulo (t=0)')
+            axes[i].axhline(0, color='black', lw=0.5, alpha=0.5)
+            
+            axes[i].set_title(f"Grand Average Filtrado: {ch_name} (N={len(epochs_total)} épocas)")
+            axes[i].set_ylabel("Amplitud (µV)")
+            axes[i].grid(True, alpha=0.2, linestyle='--')
+            axes[i].set_xlim(-5, 35)
+            axes[i].legend(loc='upper right')
+
+    plt.xlabel("Tiempo (ms)")
+    plt.tight_layout()
+    
+    # Guardar la versión final filtrada
+    plt.savefig(SUBJECT_DIR / "PERIPHERAL_GRAND_AVERAGE_FILTERED.png", dpi=300)
+    plt.show()
+
+if __name__ == "__main__":
+    plot_total_grand_average_filtered()
