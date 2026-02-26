@@ -1,0 +1,67 @@
+import mne
+import gc
+from pathlib import Path
+
+# =============================================================================
+# CONCATENACIÓN TOTAL (STANDARDS + DEVIANTS) - ANTI-CRASH
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+SUFFIX = "_BL800_COMPLEMENTARY"
+
+def concatenate_all_to_disk():
+    all_epochs_files = list(SUBJECT_DIR.glob(f"*{SUFFIX}-epo.fif"))
+    
+    if not all_epochs_files:
+        print("ERROR: No se encontraron archivos.")
+        return
+
+    # Filtramos para no incluir archivos ya combinados de intentos previos
+    references = {
+        "TH6": sorted([f for f in all_epochs_files if "RefTH6" in f.name and "Combined" not in f.name]),
+        "AC": sorted([f for f in all_epochs_files if "RefAC" in f.name and "Combined" not in f.name])
+    }
+
+    for ref_label, file_list in references.items():
+        if not file_list: continue
+
+        print(f"\n--- CONCATENANDO {ref_label} (TODO JUNTO) ---")
+        
+        # Cargamos el primer archivo como base
+        print(f"  -> Iniciando con: {file_list[0].name}")
+        combined_epochs = mne.read_epochs(file_list[0], preload=True, verbose=False)
+        
+        # Forzamos a que todas las épocas tengan el mismo ID para que se junten
+        combined_epochs.events[:, 2] = 1
+        combined_epochs.event_id = {'All_Stimuli': 1}
+
+        # Vamos añadiendo los demás uno a uno
+        for f_path in file_list[1:]:
+            print(f"  -> Añadiendo: {f_path.name}")
+            temp_epo = mne.read_epochs(f_path, preload=True, verbose=False)
+            
+            # Unificar ID antes de juntar
+            temp_epo.events[:, 2] = 1
+            temp_epo.event_id = {'All_Stimuli': 1}
+            
+            # Concatenar
+            combined_epochs = mne.concatenate_epochs([combined_epochs, temp_epo])
+            
+            # Liberar memoria de la pieza que acabamos de pegar
+            del temp_epo
+            gc.collect()
+
+        # GUARDADO FINAL
+        out_name = f"All_Runs_Combined_Ref{ref_label}{SUFFIX}-epo.fif"
+        print(f" >> Guardando archivo gigante: {out_name}...")
+        
+        # Usamos verbose=True para ver el progreso del guardado
+        combined_epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=True)
+        
+        print(f" >> ÉXITO: {ref_label} concatenado con {len(combined_epochs)} épocas.")
+        
+        # Limpiar para la siguiente referencia
+        del combined_epochs
+        gc.collect()
+
+if __name__ == "__main__":
+    concatenate_all_to_disk()
