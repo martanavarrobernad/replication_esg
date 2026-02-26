@@ -1,89 +1,77 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Created on Thu Feb 26 15:50:25 2026
-
-@author: marta.navarrobernad
-"""
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-STEP 2: DOUBLE POLARITY RE-REFERENCING
-Generates two versions (PolA and PolB) to verify Anode/Cathode orientation.
+STEP 2: PERIPHERAL RE-REFERENCING ONLY (ERB & AXILLA)
+Fixed: ValueError by setting correct channel types before bipolar montage.
 """
 
 from pathlib import Path
 import mne
 import gc
 
-# Configuration
+# Configuración de rutas
 SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
 
-CHANNELS_OF_INTEREST = [
-    'Iz', 'SC1', 'SC6', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 
-    'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S17', 'S18', 'S19',
-    'ENG_AXILLA', 'ENG_AXILLA_REF', 'ENG_ERB', 'ENG_ERB_REF', 'AC', 'TH6'
-]
-
-REFERENCES = ['TH6', 'AC']
+# SOLO estos 4 canales crudos
+PERIPHERAL_CH = ['ENG_ERB', 'ENG_ERB_REF', 'ENG_AXILLA', 'ENG_AXILLA_REF']
 
 def main():
+    # Buscamos los archivos limpios con PCHIP
     run_files = sorted(list(SUBJECT_DIR.glob("*_NoStimArtifact.vhdr")))
     
     if not run_files:
-        print(f" No files found in: {SUBJECT_DIR}")
+        print(f"[-] No se encontraron archivos '_NoStimArtifact.vhdr' en: {SUBJECT_DIR}")
         return
 
-    for f_path in run_files:
-        print(f"\n--- Processing Run: {f_path.name} ---")
-        
-        for ref_spinal in REFERENCES:
-            # Generamos las dos combinaciones de polaridad
-            for pol_label, (anode_suffix, cathode_suffix) in [('PolA', ('REF', 'RAW')), ('PolB', ('RAW', 'REF'))]:
-                
-                raw = mne.io.read_raw_brainvision(f_path, preload=True, verbose=False)
-                
-                # 1. Aislamiento preventivo
-                type_mapping = {}
-                for ch in raw.ch_names:
-                    if 'ENG_' in ch: type_mapping[ch] = 'misc'
-                    elif ch in CHANNELS_OF_INTEREST: type_mapping[ch] = 'eeg'
-                raw.set_channel_types(type_mapping, verbose=False)
+    print(f"[+] Procesando {len(run_files)} archivos. Objetivo: PolA vs PolB periférico.")
 
-                # 2. Montaje Bipolar Dinámico
-                # PolA: REF - RAW | PolB: RAW - REF
+    for f_path in run_files:
+        print(f"\n--- {f_path.name} ---")
+        
+        for pol_label, (anode_suffix, cathode_suffix) in [('PolA', ('REF', 'RAW')), ('PolB', ('RAW', 'REF'))]:
+            
+            raw = mne.io.read_raw_brainvision(f_path, preload=True, verbose=False)
+            
+            # 1. Selección y TIPADO (Crucial: deben ser 'eeg' para que MNE los reconozca)
+            available = [ch for ch in PERIPHERAL_CH if ch in raw.ch_names]
+            raw.pick_channels(available)
+            raw.set_channel_types({ch: 'eeg' for ch in available})
+
+            # 2. Montaje Bipolar
+            # PolA: REF - RAW | PolB: RAW - REF
+            try:
                 if 'ENG_ERB' in raw.ch_names and 'ENG_ERB_REF' in raw.ch_names:
-                    a = 'ENG_ERB_REF' if anode_suffix == 'REF' else 'ENG_ERB'
-                    c = 'ENG_ERB' if cathode_suffix == 'RAW' else 'ENG_ERB_REF'
-                    mne.set_bipolar_reference(raw, anode=[a], cathode=[c], ch_name='ENG_ERB_BIP', drop_refs=False, copy=False)
+                    anode = 'ENG_ERB_REF' if anode_suffix == 'REF' else 'ENG_ERB'
+                    cathode = 'ENG_ERB' if cathode_suffix == 'RAW' else 'ENG_ERB_REF'
+                    mne.set_bipolar_reference(raw, anode=[anode], cathode=[cathode], 
+                                              ch_name='ENG_ERB_BIP', drop_refs=False, copy=False)
                 
                 if 'ENG_AXILLA' in raw.ch_names and 'ENG_AXILLA_REF' in raw.ch_names:
-                    a = 'ENG_AXILLA_REF' if anode_suffix == 'REF' else 'ENG_AXILLA'
-                    c = 'ENG_AXILLA' if cathode_suffix == 'RAW' else 'ENG_AXILLA_REF'
-                    mne.set_bipolar_reference(raw, anode=[a], cathode=[c], ch_name='ENG_AXILLA_BIP', drop_refs=False, copy=False)
+                    anode = 'ENG_AXILLA_REF' if anode_suffix == 'REF' else 'ENG_AXILLA'
+                    cathode = 'ENG_AXILLA' if cathode_suffix == 'RAW' else 'ENG_AXILLA_REF'
+                    mne.set_bipolar_reference(raw, anode=[anode], cathode=[cathode], 
+                                              ch_name='ENG_AXILLA_BIP', drop_refs=False, copy=False)
+            except ValueError as e:
+                print(f"  [!] Error en bipolar: {e}")
+                continue
 
-                # 3. Referencia Espinal (No afecta a los 'misc')
-                if ref_spinal in raw.ch_names:
-                    raw.set_eeg_reference(ref_channels=[ref_spinal], verbose=False)
+            # 3. Limpieza de canales sobrantes
+            ch_to_drop = ['ENG_ERB', 'ENG_ERB_REF', 'ENG_AXILLA', 'ENG_AXILLA_REF']
+            raw.drop_channels([ch for ch in ch_to_drop if ch in raw.ch_names])
+            
+            # 4. Renombrar a nombres finales
+            final_mapping = {'ENG_ERB_BIP': 'ENG_ERB', 'ENG_AXILLA_BIP': 'ENG_AXILLA'}
+            raw.rename_channels({k: v for k, v in final_mapping.items() if k in raw.ch_names})
 
-                # 4. Limpieza y Naming
-                ch_to_drop = ['ENG_ERB', 'ENG_ERB_REF', 'ENG_AXILLA', 'ENG_AXILLA_REF']
-                raw.drop_channels([ch for ch in ch_to_drop if ch in raw.ch_names])
-                
-                final_mapping = {'ENG_ERB_BIP': 'ENG_ERB', 'ENG_AXILLA_BIP': 'ENG_AXILLA'}
-                raw.rename_channels({k: v for k, v in final_mapping.items() if k in raw.ch_names})
-                raw.set_channel_types({ch: 'eeg' for ch in ['ENG_ERB', 'ENG_AXILLA'] if ch in raw.ch_names})
+            # 5. Guardado
+            out_name = SUBJECT_DIR / f"{f_path.stem}_PERIPH_{pol_label}.fif"
+            raw.save(out_name, overwrite=True, verbose=False)
+            print(f"  -> Guardado: {out_name.name}")
+            
+            del raw
+            gc.collect()
 
-                # 5. Guardado con sufijo de polaridad
-                out_name = SUBJECT_DIR / f"{f_path.stem}_Ref{ref_spinal}_{pol_label}.fif"
-                raw.save(out_name, overwrite=True, verbose=False)
-                print(f"  Saved: {out_name.name}")
-                
-                del raw
-                gc.collect()
-
-    print("\n[DONE] All combinations generated. You can now compare PolA vs PolB.")
+    print("\n[OK] Script finalizado sin errores de tipos. PolA y PolB listos.")
 
 if __name__ == "__main__":
     main()
