@@ -1,0 +1,74 @@
+import mne
+import numpy as np
+from pathlib import Path
+import gc
+
+# =============================================================================
+# STEP: THRESHOLD REJECTION + CONCATENATION (8 RUNS)
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+SUFFIX = "_LATERALIZATION"
+
+# Elige la referencia que vas a procesar (RefTH6 o RefAC)
+REF_TARGET = "RefTH6" 
+
+def run_rejection_and_concatenation():
+    # 1. Selección estricta de los 8 archivos (tras tu limpieza manual)
+    file_list = sorted([
+        f for f in SUBJECT_DIR.glob(f"*{SUFFIX}-epo.fif") 
+        if REF_TARGET in f.name and "Pol" not in f.name
+    ])
+    
+    print(f"--- INICIANDO LIMPIEZA Y UNIÓN: {REF_TARGET} ---")
+    print(f"[+] Archivos detectados: {len(file_list)}")
+    
+    all_epochs_list = []
+    
+    # 2. Bucle de limpieza individual (Archivo por Archivo)
+    for f_path in file_list:
+        print(f" >> Procesando: {f_path.name}")
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        
+        # Filtro 30-400Hz antes del rechazo (para no tirar épocas por derivas lentas)
+        epochs.filter(30, 400, method='iir', 
+                      iir_params=dict(order=4, ftype='butter'), 
+                      phase='zero', verbose=False)
+
+        # --- Threshold Rejection Adaptativo (P98) ---
+        # Buscamos el valor de pico a pico (PTP) en todos los canales de datos
+        data = epochs.get_data(picks='data')
+        ptp_per_epoch = np.ptp(data, axis=-1).max(axis=1) # El máximo PTP de cada época
+        
+        # El umbral es el percentil 98 (eliminamos el 2% de épocas más ruidosas)
+        thresh_val = np.percentile(ptp_per_epoch, 98)
+        
+        n_pre = len(epochs)
+        epochs.drop_bad(reject=dict(eeg=thresh_val), verbose=False)
+        n_post = len(epochs)
+        
+        print(f"    - Umbral aplicado: {thresh_val*1e6:.2f} µV")
+        print(f"    - Épocas restantes: {n_post}/{n_pre} ({n_pre-n_post} eliminadas)")
+        
+        all_epochs_list.append(epochs)
+        gc.collect()
+
+    # 3. Concatenación Final
+    if all_epochs_list:
+        print("\n[+] Concatenando todos los archivos en un objeto único...")
+        combined_epochs = mne.concatenate_epochs(all_epochs_list)
+        
+        # 4. Guardar el resultado final
+        output_name = SUBJECT_DIR / f"GRAND_CONCAT_{REF_TARGET}_LATERALIZATION-epo.fif"
+        combined_epochs.save(output_name, overwrite=True, verbose=False)
+        
+        print("-" * 40)
+        print(f"PROCESO COMPLETADO")
+        print(f"Archivo guardado: {output_name.name}")
+        print(f"Total de épocas limpias: {len(combined_epochs)}")
+        print(f"Canales incluidos: {len(combined_epochs.ch_names)}")
+        print("-" * 40)
+    else:
+        print("[-] Error: No se pudieron cargar épocas para concatenar.")
+
+if __name__ == "__main__":
+    run_rejection_and_concatenation()
