@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  2 15:10:19 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+STEP 2: DOUBLE RE-REFERENCING (TH6 and AC)
+- Bipolar calculation for Erb and Axilla.
+- Spinal channels referred to TH6 and AC separately.
+"""
+
+from pathlib import Path
+import mne
+import gc
+
+# Configuración
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+# Lista de canales que queremos mantener en el archivo final
+SPINAL_CHANNELS = [
+    'Iz', 'SC1', 'SC6', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 
+    'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S17', 'S18', 'S19'
+]
+
+REFERENCES = ['TH6', 'AC']
+
+def main():
+    # Buscamos los archivos .fif generados en el paso de interpolación
+    run_files = sorted(list(SUBJECT_DIR.glob("*_NoStimArtifact.fif")))
+    
+    if not run_files:
+        print(f" No se encontraron archivos .fif con sufijo '_NoStimArtifact' en: {SUBJECT_DIR}")
+        return
+
+    for f_path in run_files:
+        print(f"\n--- Procesando archivo base: {f_path.name} ---")
+        
+        for ref in REFERENCES:
+            # 1. CARGA FRESCA: Cargamos el raw dentro del bucle de la referencia
+            # Esto evita que los cambios de la ref anterior afecten a la siguiente
+            raw = mne.io.read_raw_fif(f_path, preload=True, verbose=False)
+            
+            # 2. CONFIGURACIÓN BIPOLAR (Erb y Axilla)
+            # Solo intentamos crearlos si los canales fuente existen
+            if 'ENG_ERB' in raw.ch_names and 'ENG_ERB_REF' in raw.ch_names:
+                print(f"  -> [{ref}] Calculando Bipolar: ENG_ERB")
+                mne.set_bipolar_reference(raw, anode=['ENG_ERB'], cathode=['ENG_ERB_REF'], 
+                                          ch_name='ENG_ERB_BIP', drop_refs=True, copy=False, verbose=False)
+                # Renombramos al nombre final para que sea consistente
+                raw.rename_channels({'ENG_ERB_BIP': 'ENG_ERB'})
+                raw.set_channel_types({'ENG_ERB': 'misc'})
+
+            if 'ENG_AXILLA' in raw.ch_names and 'ENG_AXILLA_REF' in raw.ch_names:
+                print(f"  -> [{ref}] Calculando Bipolar: ENG_AXILLA")
+                mne.set_bipolar_reference(raw, anode=['ENG_AXILLA'], cathode=['ENG_AXILLA_REF'], 
+                                          ch_name='ENG_AXILLA_BIP', drop_refs=True, copy=False, verbose=False)
+                raw.rename_channels({'ENG_AXILLA_BIP': 'ENG_AXILLA'})
+                raw.set_channel_types({'ENG_AXILLA': 'misc'})
+
+            # 3. RE-REFERENCIACIÓN GLOBAL (Solo Espinales)
+            if ref in raw.ch_names:
+                # Marcamos los canales de interés como 'eeg' para la referencia
+                raw.set_channel_types({ch: 'eeg' for ch in raw.ch_names if ch in SPINAL_CHANNELS or ch == ref})
+                
+                print(f"  -> [{ref}] Referenciando Montaje Espinal a {ref}...")
+                raw.set_eeg_reference(ref_channels=[ref], verbose=False)
+                
+                # Devolvemos periféricos a 'eeg' para que se guarden correctamente
+                for ch in ['ENG_ERB', 'ENG_AXILLA']:
+                    if ch in raw.ch_names:
+                        raw.set_channel_types({ch: 'eeg'})
+                
+                # 4. GUARDAR
+                out_name = SUBJECT_DIR / f"{f_path.stem}_Ref{ref}.fif"
+                raw.save(out_name, overwrite=True, verbose=False)
+                print(f"  [OK] Guardado: {out_name.name}")
+            
+            # Limpieza absoluta de memoria antes de la siguiente referencia
+            del raw
+            gc.collect()
+
+    print("\n--- Doble Re-referenciación completada ---")
+
+if __name__ == "__main__":
+    main()
