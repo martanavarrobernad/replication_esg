@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  2 14:36:58 2026
+
+@author: marta.navarrobernad
+"""
+import mne
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN: 5 NIVELES DE INSPECCIÓN (AXILLA, ERB, AC, TH6, SPINAL)
+# =============================================================================
+SUBJECT_DIR = Path(r"/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+OUT_CSV = SUBJECT_DIR / "tiempos_artefacto_DETALLADO.csv"
+
+# Definición de grupos individuales
+GROUPS = {
+    'Axilla': ["ENG_AXILLA", "ENG_AXILLA_REF"],
+    'Erb':    ["ENG_ERB", "ENG_ERB_REF"],
+    'Ref_AC': ["AC"],
+    'Ref_TH6':["TH6"],
+    'Spinal': ["Iz", "SC1", "S3", "S4", "S5", "S6", "S7", "S8", "S9", "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19", "SC6"]
+}
+
+EPOCH_VIEW_MS = (-10.0, 15.0)
+
+# Triggers Lateralización
+TRIG_IZQ = [109, 125, 101, 117, 105, 108, 113, 116, 97, 100, 121, 124, 73, 76, 81, 84, 85, 77, 93, 65, 68, 69, 89, 92]
+TRIG_DER = [173, 189, 165, 181, 161, 164, 185, 188, 169, 172, 177, 180, 141, 137, 140, 145, 148, 149, 129, 132, 133, 153, 156, 157]
+
+def get_group_avg(raw, events, event_id, trigger_list, channel_list, t_info):
+    sf = raw.info["sfreq"]
+    s0, s1 = t_info['s0'], t_info['s1']
+    win_len = s1 - s0 + 1
+    
+    present_chs = [ch for ch in channel_list if ch in raw.ch_names]
+    if not present_chs: return None
+
+    valid_codes = [event_id[n] for n in event_id if any(f"S{t}" in n or f"S {t}" in n for t in trigger_list)]
+    if not valid_codes: return None
+    
+    stim_evs = events[np.isin(events[:, 2], valid_codes)]
+    avg_sum = np.zeros(win_len)
+    count = 0
+    
+    for ev in stim_evs[:, 0]:
+        i0, i1 = ev + s0, ev + s1
+        if 0 <= i0 and i1 < raw.n_times:
+            seg = raw.get_data(picks=present_chs, start=i0, stop=i1+1)
+            avg_sum += seg.mean(axis=0) * 1e6 
+            count += 1
+    return avg_sum / count if count > 0 else None
+
+def interactive_selection(t_ms, data_dict, run_name):
+    """Muestra 5 subplots para una inspección quirúrgica del artefacto."""
+    plt.ion()
+    fig, axes = plt.subplots(5, 1, figsize=(12, 16), sharex=True)
+    
+    keys = ['Axilla', 'Erb', 'Ref_AC', 'Ref_TH6', 'Spinal']
+    colors_l = 'royalblue'
+    colors_r = 'darkorange'
+    
+    for i, key in enumerate(keys):
+        ax = axes[i]
+        data = data_dict[key]
+        if data['izq'] is not None: ax.plot(t_ms, data['izq'], color=colors_l, label="Left Stim")
+        if data['der'] is not None: ax.plot(t_ms, data['der'], color=colors_r, label="Right Stim", alpha=0.7)
+        
+        ax.set_title(f"Group: {key} - {run_name}", fontweight='bold')
+        ax.axvline(0, color="red", ls="--", alpha=0.5)
+        ax.legend(loc='upper right', fontsize='x-small')
+        ax.grid(True, alpha=0.2)
+
+    axes[4].set_xlabel("Time (ms)")
+    print(f"\n[!] INSTRUCCIÓN: Mira el final del artefacto en TH6 frente a AC.")
+    print(f"Haz CLICK en el START y END global (la ventana que cubra a todos).")
+    
+    pts = plt.ginput(2, timeout=-1)
+    plt.close(fig)
+    
+    if len(pts) < 2: return None, None
+    xs = sorted(p[0] for p in pts)
+    return xs[0], xs[1]
+
+def main():
+    # MODIFICACIÓN AQUÍ: Filtro estricto para coger solo .vhdr crudos
+    vhdr_files = sorted([
+        f for f in SUBJECT_DIR.glob("*.vhdr") 
+        if "Run" in f.name 
+        and "Rest" not in f.name       # Ignora grabaciones de reposo
+        and "NoStim" not in f.name    # Ignora archivos ya interpolados
+        and "Ref" not in f.name       # Ignora archivos ya re-referenciados
+    ])
+    
+    if not vhdr_files:
+        print(f"No se encontraron archivos .vhdr originales en: {SUBJECT_DIR}")
+        return
+
+    rows = []
+    for vhdr in vhdr_files:
+        print(f"\n>> Procesando ORIGINAL: {vhdr.name}")
+        # El resto del código sigue igual...
+        raw = mne.io.read_raw_brainvision(vhdr, preload=True, verbose=False)
+        events, event_id = mne.events_from_annotations(raw, verbose=False)
+        
+        sf = raw.info["sfreq"]
+        t_info = {'s0': int(round(EPOCH_VIEW_MS[0]/1000*sf)), 's1': int(round(EPOCH_VIEW_MS[1]/1000*sf))}
+        t_ms = np.arange(t_info['s1'] - t_info['s0'] + 1) / sf * 1000 + EPOCH_VIEW_MS[0]
+
+        data_to_show = {}
+        for key, ch_list in GROUPS.items():
+            data_to_show[key] = {
+                'izq': get_group_avg(raw, events, event_id, TRIG_IZQ, ch_list, t_info),
+                'der': get_group_avg(raw, events, event_id, TRIG_DER, ch_list, t_info)
+            }
+
+        start_ms, end_ms = interactive_selection(t_ms, data_to_show, vhdr.name)
+        
+        if start_ms is not None:
+            rows.append({"run": vhdr.name, "start_ms": start_ms, "end_ms": end_ms})
+            print(f"   [OK] Guardado: {start_ms:.2f} a {end_ms:.2f} ms")
+
+    if rows:
+        pd.DataFrame(rows).to_csv(OUT_CSV, index=False)
+        print(f"\nCSV DETALLADO generado en: {OUT_CSV}")
+
+if __name__ == "__main__":
+    main()
