@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  2 15:38:17 2026
+
+@author: marta.navarrobernad
+"""
+
+import mne
+import numpy as np
+import re
+from pathlib import Path
+import gc
+
+# =============================================================================
+# CONFIGURACIÓN (Baseline -800ms + ECG Gating)
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+TMIN, TMAX = -0.850, 0.600  
+BASELINE = (-0.800, 0.000) 
+SUFFIX = "_BL800_COMPLEMENTARY"
+
+# DICCIONARIO COMPLETO (48 Triggers estructurados por Run)
+BLOCK_TRIGGERS = {
+    # --- INATTENTIVE ---
+    1: { # right x x right right
+        "Right_Std_P1_LStd_GStd": 161, "Right_Std_P2_LStd_GStd": 164, "Right_Std_P3_LStd_GStd": 165,
+        "Right_Dev_P1_LStd_GDev": 185, "Right_Dev_P2_LStd_GDev": 188, "Left_Dev_P3_LDev_GDev": 125 
+    },
+    2: { # right x x right left
+        "Right_Std_P1_LStd_GStd": 169, "Right_Std_P2_LStd_GStd": 172, "Left_Std_P3_LDev_GStd": 109,
+        "Right_Dev_P1_LStd_GDev": 177, "Right_Dev_P2_LStd_GDev": 180, "Right_Dev_P3_LStd_GDev": 181
+    },
+    3: { # left x x left right
+        "Left_Std_P1_LStd_GStd": 105,  "Left_Std_P2_LStd_GStd": 108,  "Right_Std_P3_LDev_GStd": 173,
+        "Left_Dev_P1_LStd_GDev": 113,  "Left_Dev_P2_LStd_GDev": 116,  "Left_Dev_P3_LStd_GDev": 117 
+    },
+    4: { # left x x left left
+        "Left_Std_P1_LStd_GStd": 97,   "Left_Std_P2_LStd_GStd": 100, "Left_Std_P3_LStd_GStd": 101,
+        "Left_Dev_P1_LStd_GDev": 121,  "Left_Dev_P2_LStd_GDev": 124, "Right_Dev_P3_LDev_GDev": 189
+    },
+    # --- ATTENTIVE ---
+    5: { # left x x left right
+        "Left_Std_P1_LStd_GStd": 73,   "Left_Std_P2_LStd_GStd": 76,   "Right_Std_P3_LDev_GStd": 141,
+        "Left_Dev_P1_LStd_GDev": 81,   "Left_Dev_P2_LStd_GDev": 84,   "Left_Dev_P3_LStd_GDev": 85 
+    },
+    6: { # right x x right left
+        "Right_Std_P1_LStd_GStd": 137, "Right_Std_P2_LStd_GStd": 140, "Left_Std_P3_LDev_GStd": 77,
+        "Right_Dev_P1_LStd_GDev": 145, "Right_Dev_P2_LStd_GDev": 148, "Right_Dev_P3_LStd_GDev": 149
+    },
+    7: { # right x x right right
+        "Right_Std_P1_LStd_GStd": 129, "Right_Std_P2_LStd_GStd": 132, "Right_Std_P3_LStd_GStd": 133,
+        "Right_Dev_P1_LStd_GDev": 153, "Right_Dev_P2_LStd_GDev": 156, "Left_Dev_P3_LDev_GDev": 93 
+    },
+    8: { # left x x left left
+        "Left_Std_P1_LStd_GStd": 65,   "Left_Std_P2_LStd_GStd": 68,   "Left_Std_P3_LStd_GStd": 69,
+        "Left_Dev_P1_LStd_GDev": 89,   "Left_Dev_P2_LStd_GDev": 92,   "Right_Dev_P3_LDev_GDev": 157
+    }
+}
+
+def run_step3_final():
+    # Buscamos archivos .fif (Continuous) que salieron de la re-referencia
+    input_files = sorted([
+        f for f in SUBJECT_DIR.glob("*_Ref*.fif") 
+        if "-epo.fif" not in f.name and "NoStimArtifact" in f.name
+    ])
+    
+    print(f"--- INICIANDO GATING + EPOCHING (48 TRIGGERS) ---")
+    
+    if not input_files:
+        print("ERROR: No se encontraron archivos continuos válidos.")
+        return
+
+    for f_path in input_files:
+        # Extraer Run y Referencia del nombre del archivo
+        match = re.search(r'Run(\d+).*Ref(\w+)', f_path.name)
+        if not match: continue
+            
+        run_idx = int(match.group(1))
+        ref_type = match.group(2)
+        
+        if run_idx not in BLOCK_TRIGGERS: continue
+            
+        target_dict = BLOCK_TRIGGERS[run_idx]
+        print(f"\n>> Procesando Run {run_idx} | Ref: {ref_type}")
+
+        try:
+            # 1. CARGA
+            raw = mne.io.read_raw_fif(f_path, preload=True, verbose=False)
+            events, _ = mne.events_from_annotations(raw, verbose=False)
+            
+            # 2. MAPEADO DE EVENTOS
+            # Invertimos el diccionario para que MNE asocie el código con el nombre
+            current_event_id = {name: code for name, code in target_dict.items() if code in events[:, 2]}
+            
+            if not current_event_id:
+                print(f"   Aviso: No se encontraron los triggers del bloque en {f_path.name}")
+                continue
+
+            # 3. EPOCHING
+            epochs = mne.Epochs(raw, events, event_id=current_event_id, 
+                                tmin=TMIN, tmax=TMAX, baseline=BASELINE, 
+                                preload=True, verbose=False)
+            
+            n_initial = len(epochs)
+
+            # 4. ECG GATING (Rechazo de épocas que coinciden con el latido)
+            if 'ECG' in raw.ch_names:
+                # Detectamos picos R
+                ecg_events, _, _ = mne.preprocessing.find_ecg_events(raw, ch_name='ECG', verbose=False)
+                
+                sr = raw.info['sfreq']
+                win_samples = int(0.150 * sr) # Ventana de 150ms
+                
+                # Creamos una máscara de muestras "prohibidas"
+                bad_samples = set()
+                for r_peak in ecg_events[:, 0]:
+                    bad_samples.update(range(r_peak - win_samples, r_peak + win_samples))
+                
+                # Buscamos qué triggers caen dentro de la máscara
+                epochs_to_drop = [i for i, smp in enumerate(epochs.events[:, 0]) if smp in bad_samples]
+                
+                if epochs_to_drop:
+                    pct = (len(epochs_to_drop) / n_initial) * 100
+                    print(f"   -> ECG Gating: Eliminando {len(epochs_to_drop)} épocas ({pct:.2f}%)")
+                    epochs.drop(epochs_to_drop, reason='ECG_coincidence', verbose=False)
+                else:
+                    print("   -> ECG Gating: 0 épocas eliminadas.")
+
+            # 5. GUARDADO FINAL
+            out_name = f"Clean_Epochs_Run{run_idx}_Ref{ref_type}{SUFFIX}-epo.fif"
+            epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=False)
+            
+            print(f"   -> Guardado: {out_name} | Épocas finales: {len(epochs)}")
+
+            # Limpieza RAM
+            del raw, epochs
+            gc.collect()
+
+        except Exception as e:
+            print(f"   !!! ERROR en Run {run_idx}: {e}")
+
+    print("\n--- PROCESO COMPLETADO: ÉPOCAS LIMPIAS GENERADAS ---")
+
+if __name__ == "__main__":
+    run_step3_final()
