@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Mar  2 11:08:24 2026
+
+@author: marta.navarrobernad
+"""
+
+import mne
+import matplotlib.pyplot as plt
+from pathlib import Path
+import gc
+
+# =============================================================================
+# SANITY CHECK: CENTRAL VS LATERAL SPINAL CHANNELS (N13 AMPLITUDE)
+# =============================================================================
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+TEMP_DIR = BASE_DIR / "TEMP_CHUNKS"
+REFERENCE = "TH6"
+
+# Definición de grupos según tu mapa de electrodos
+CENTRAL_CH = ["SC1", "S3", "S6", "SC6", "S14", "S18"]
+LATERAL_CH = ["S4", "S8", "S12", "S16"] # Los más alejados (5cm)
+CONTROL_CH = ["ENG_ERB"]
+
+def plot_sanity_check_n13():
+    chunk_files = sorted(list(TEMP_DIR.glob("*.fif")))
+    
+    if not chunk_files:
+        print(f"[-] No se encontraron archivos en {TEMP_DIR}")
+        return
+
+    all_evokeds = []
+    total_epochs = 0
+
+    print(f"[+] Cargando datos para Sanity Check...")
+    for f_path in chunk_files:
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        total_epochs += len(epochs)
+        
+        # Aplicamos el filtro 30-400Hz para limpiar la N13
+        epochs.filter(30, 400, method='iir', iir_params=dict(order=4, ftype='butter'), phase='zero', verbose=False)
+        
+        all_evokeds.append(epochs.average())
+        del epochs
+        gc.collect()
+
+    grand_average = mne.combine_evoked(all_evokeds, weights='nave')
+    grand_average.apply_baseline((-0.010, 0))
+
+    # --- PLOTTING ---
+    tmin_plot, tmax_plot = -0.010, 0.045
+    ga_zoom = grand_average.copy().crop(tmin_plot, tmax_plot)
+    times = ga_zoom.times * 1000
+
+    plt.figure(figsize=(10, 6))
+    
+    # 1. Media Central (Línea Media - Máxima amplitud esperada)
+    picks_central = [c for c in CENTRAL_CH if c in ga_zoom.ch_names]
+    data_central = ga_zoom.copy().pick(picks_central).data * 1e6
+    plt.plot(times, data_central.mean(axis=0), color='crimson', lw=3, label='MEAN CENTRAL (N13 Max)')
+    
+    # 2. Media Lateral (5cm fuera - Amplitud atenuada esperada)
+    picks_lateral = [c for c in LATERAL_CH if c in ga_zoom.ch_names]
+    data_lateral = ga_zoom.copy().pick(picks_lateral).data * 1e6
+    plt.plot(times, data_lateral.mean(axis=0), color='royalblue', lw=3, label='MEAN LATERAL (5cm)')
+
+    # 3. Control Erb (Para asegurar que el estímulo fue correcto)
+    if 'ENG_ERB' in ga_zoom.ch_names:
+        data_erb = ga_zoom.copy().pick('ENG_ERB').data[0] * 1e6
+        plt.plot(times, data_erb, color='gray', lw=1.5, linestyle='--', label='Control: Erb')
+
+    # Guías visuales
+    plt.axvline(0, color='black', lw=1.5)
+    plt.axhline(0, color='black', lw=0.5, alpha=0.5)
+    
+    # Zoom en la N13 (Suele estar entre 12-15ms)
+    plt.ylim(-2.5, 2.5) 
+    plt.title(f"Sanity Check N13: Central vs Lateral Channels (n={total_epochs})\nRef: {REFERENCE} | Filter: 30-400Hz", fontweight='bold')
+    plt.xlabel("Time (ms)")
+    plt.ylabel("Amplitude (µV)")
+    plt.legend(loc='upper right')
+    plt.grid(True, alpha=0.15)
+    
+    plt.tight_layout()
+    plt.show()
+
+if __name__ == "__main__":
+    plot_sanity_check_n13()
