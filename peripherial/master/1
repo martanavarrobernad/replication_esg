@@ -11,13 +11,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# =============================================================================
-# CONFIGURACIÓN: 5 NIVELES DE INSPECCIÓN (AXILLA, ERB, AC, TH6, SPINAL)
-# =============================================================================
+# Configuration
 SUBJECT_DIR = Path(r"/home/marta.navarrobernad/Desktop/sub-P02/eeg")
 OUT_CSV = SUBJECT_DIR / "tiempos_artefacto_DETALLADO.csv"
 
-# Definición de grupos individuales
+# We define different groups to see how the stimulation artifact differs between them and then choose a common window
 GROUPS = {
     'Axilla': ["ENG_AXILLA", "ENG_AXILLA_REF"],
     'Erb':    ["ENG_ERB", "ENG_ERB_REF"],
