@@ -1,0 +1,104 @@
+import mne
+import matplotlib.pyplot as plt
+from pathlib import Path
+import gc
+import numpy as np
+
+# =============================================================================
+# CONFIGURACIÓN
+# =============================================================================
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+INPUT_DIR = BASE_DIR / "CLEAN_EPOCHS_FINAL"
+REFERENCE = "TH6"
+
+# Montaje personalizado
+SPINAL_CH_LIST = ["Iz", "SC1", "S3", "S6", "SC6", "S14", "S18", "S7", "S11", "S15", "S19", "S5", "S9", "S13", "S17", "S4", "S8", "S12", "S16"]
+CONTROL_CH = ["ENG_ERB", "ENG_AXILLA"]
+
+def generate_grand_average(filter_type="GABRIELI"):
+    """
+    Carga archivos CLEANED, promedia individualmente y combina.
+    """
+    # Buscamos los archivos terminados en CLEANED-epo.fif
+    file_list = sorted(list(INPUT_DIR.glob(f"*{filter_type}*CLEANED-epo.fif")))
+    
+    if not file_list:
+        print(f"[-] No se encontraron archivos para {filter_type} en {INPUT_DIR}")
+        return
+
+    print(f"\n[+] Procesando {len(file_list)} archivos de {filter_type}...")
+    
+    all_evokeds = []
+    total_epochs = 0
+
+    for f_path in file_list:
+        print(f"    Cargando: {f_path.name}")
+        
+        # 1. Cargamos el archivo (Sin argumentos extra para evitar TypeError)
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        
+        # 2. Limpieza de seguridad: borramos rastro de rechazo (EOG/EMG)
+        epochs.reject = None
+        epochs.flat = None
+        
+        total_epochs += len(epochs)
+        
+        # 3. Promediamos el archivo y lo guardamos en la lista
+        all_evokeds.append(epochs.average())
+        
+        # 4. Liberamos RAM
+        del epochs
+        gc.collect()
+
+    # 5. Combinamos todos los promedios (Grand Average)
+    grand_average = mne.combine_evoked(all_evokeds, weights='nave')
+    
+    # Aplicamos baseline de visualización (-10ms a 0ms)
+    grand_average.apply_baseline((-0.010, 0))
+
+    # --- CONFIGURACIÓN DE GRÁFICA ---
+    if filter_type == "GABRIELI":
+        tmin_p, tmax_p = -0.010, 0.050 
+        ylim_p = (-5, 5)
+    else:
+        tmin_p, tmax_p = -0.050, 0.500 
+        ylim_p = (-12, 12)
+
+    # --- PLOTTING ---
+    plt.figure(figsize=(10, 6))
+    picks_spinal = [c for c in SPINAL_CH_LIST if c in grand_average.ch_names]
+    
+    # Cortamos la ventana de tiempo para el zoom
+    ga_zoom = grand_average.copy().crop(tmin_p, tmax_p)
+    times = ga_zoom.times * 1000 # Pasar a ms
+    
+    # 1. Butterfly Plot (Gris)
+    data_spinal = ga_zoom.copy().pick(picks_spinal).data * 1e6
+    for i in range(data_spinal.shape[0]):
+        plt.plot(times, data_spinal[i, :], color='gray', alpha=0.3, lw=0.7)
+    
+    # 2. Media Espinal (Rojo)
+    plt.plot(times, data_spinal.mean(axis=0), color='red', lw=2.5, label='MEDIA ESPINAL')
+    
+    # 3. Controles (Erb / Axilla)
+    colors = ['blue', 'green']
+    for i, ctrl in enumerate(CONTROL_CH):
+        if ctrl in grand_average.ch_names:
+            data_ctrl = ga_zoom.copy().pick(ctrl).data[0] * 1e6
+            plt.plot(times, data_ctrl, color=colors[i % 2], lw=2, label=ctrl)
+
+    plt.axvline(0, color='black', linestyle='--', lw=1.5, label='Stimulus')
+    
+    plt.ylim(ylim_p)
+    plt.title(f"Grand Average {filter_type} | Ref: {REFERENCE}\nn={total_epochs} épocas", fontweight='bold')
+    plt.legend(loc='upper right')
+    plt.grid(True, alpha=0.2)
+    
+    # Guardar PNG
+    plt.savefig(INPUT_DIR / f"Plot_GA_{filter_type}_{REFERENCE}.png", dpi=200)
+    plt.show()
+
+if __name__ == "__main__":
+    # Generamos los promedios finales para ambas ramas
+    generate_grand_average("GABRIELI")
+    generate_grand_average("WIMMER")
