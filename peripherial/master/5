@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Tue Mar  3 11:28:14 2026
+
+@author: marta.navarrobernad
+"""
+
+import mne
+import gc
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN DE FILTROS ESPECÍFICOS
+# =============================================================================
+
+# 1. GABRIELI (Early Components)
+# High-pass: 50 Hz | Low-pass: 800 Hz | Type: FIR | Length: Auto
+GAB_HP, GAB_LP = 50.0, 800.0
+
+# 2. WIMMER (Late Components)
+# High-pass: 0.5 Hz | Low-pass: 60 Hz | Type: IIR | Order: 3
+WIM_HP, WIM_LP = 0.5, 60.0
+
+# Umbral de rechazo Peak-to-Peak (100 microvoltios)
+REJECT_CRITERIA = dict(eeg=100e-6) 
+
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+def process_filters():
+    # Buscamos las épocas que salieron del ECG Gating
+    epo_files = sorted(list(SUBJECT_DIR.glob("Clean_Epochs_*_Ref*_PolB_BL800_COMPLEMENTARY-epo.fif")))
+    
+    if not epo_files:
+        print("ERROR: No se encontraron archivos de épocas. Revisa la ruta y los nombres.")
+        return
+
+    for f_path in epo_files:
+        print(f"\n--- Procesando: {f_path.name} ---")
+        
+        # 1. Cargar épocas del ECG Gating
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        
+        # 2. Limpieza por umbral previa al filtrado (evita que el filtro propague artefactos)
+        n_ini = len(epochs)
+        epochs.drop_bad(reject=REJECT_CRITERIA, verbose=False)
+        print(f"   -> Rechazo Umbral: {n_ini - len(epochs)} épocas eliminadas.")
+
+        # --- RAMA GABRIELI (FIR) ---
+        print(f"   -> Aplicando Gabrieli (FIR {GAB_HP}-{GAB_LP} Hz, len: auto)")
+        # method='fir' con fir_design='firwin' aplica el filtro FIR de ventana (Hamming por defecto)
+        epochs_gab = epochs.copy().filter(
+            l_freq=GAB_HP, 
+            h_freq=GAB_LP, 
+            method='fir', 
+            phase='zero', 
+            fir_window='hamming', 
+            fir_design='firwin', 
+            filter_length='auto',
+            verbose=False
+        )
+        out_gab = SUBJECT_DIR / f"{f_path.stem}_GABRIELI-epo.fif"
+        epochs_gab.save(out_gab, overwrite=True, verbose=False)
+
+        # --- RAMA WIMMER (IIR) ---
+        print(f"   -> Aplicando Wimmer (IIR Order 3 {WIM_HP}-{WIM_LP} Hz)")
+        # Definimos el tipo IIR como Butterworth de orden 3
+        iir_params = dict(order=3, ftype='butter', output='sos')
+        epochs_wim = epochs.copy().filter(
+            l_freq=WIM_HP, 
+            h_freq=WIM_LP, 
+            method='iir', 
+            iir_params=iir_params, 
+            verbose=False
+        )
+        out_wim = SUBJECT_DIR / f"{f_path.stem}_WIMMER-epo.fif"
+        epochs_wim.save(out_wim, overwrite=True, verbose=False)
+
+        # Liberar memoria de los objetos grandes
+        del epochs, epochs_gab, epochs_wim
+        gc.collect()
+
+    print("\n--- PROCESO DE DOBLE FILTRADO COMPLETADO ---")
+
+if __name__ == "__main__":
+    process_filters()
