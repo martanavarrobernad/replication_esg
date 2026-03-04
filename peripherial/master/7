@@ -1,67 +1,59 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Mar  4 14:13:26 2026
-
-@author: marta.navarrobernad
-"""
-
 import mne
-import gc
 import numpy as np
 from pathlib import Path
+import gc
 
 # =============================================================================
-# Harcoded porque estaba teniendo muchos problemas con la RAM al automatizar 
+# CONFIGURACIÓN PERIFÉRICA ADAPTATIVA
 # =============================================================================
-FILTRO = "GABRIELI"  # Prueba con uno y luego con otro
-REF = "AC"
-
 BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
-CLEAN_DIR = BASE_DIR / "CLEAN_EPOCHS_FINAL"
-OUT_DIR = BASE_DIR / "GRAND_AVERAGES"
+INPUT_FILES = sorted(list(BASE_DIR.glob("*_GABRIELI-epo.fif")) + list(BASE_DIR.glob("*_WIMMER-epo.fif")))
+OUT_DIR = BASE_DIR / "CLEAN_EPOCHS_PERIPH"
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 
-def generate_grand_average_safe(filter_type, ref_type):
-    # Buscamos los archivos CLEANED
-    pattern = f"CLEANED_{ref_type}_{filter_type}_*.fif"
-    files = sorted(list(CLEAN_DIR.glob(pattern)))
+CH_PERIPH = ['ENG_ERB', 'ENG_AXILLA']
 
-    if not files:
-        print(f"[-] No hay archivos para {ref_type}-{filter_type}")
-        return
-
-    print(f"\n[+] PROCESANDO: {filter_type} | {ref_type}")
-    
-    all_evokeds = []
-    total_epochs_count = 0
-
-    for f_path in files:
-        print(f"    -> Extrayendo promedio de: {f_path.name}")
-        # Cargamos, promediamos y soltamos RAM inmediatamente
+def process_peripheral_adaptive():
+    print("--- INICIANDO LIMPIEZA PERIFÉRICA ADAPTATIVA ---")
+    for f_path in INPUT_FILES:
+        ref = "TH6" if "RefTH6" in f_path.name else "AC" if "RefAC" in f_path.name else "UNK"
+        filt = "GABRIELI" if "GABRIELI" in f_path.name else "WIMMER"
+        
         epochs = mne.read_epochs(f_path, preload=True, verbose=False)
         
-        n_epochs = len(epochs)
-        total_epochs_count += n_epochs
+        # 1. Quedarse solo con canales periféricos
+        picks_pe = [ch for ch in CH_PERIPH if ch in epochs.ch_names]
+        if not picks_pe:
+            continue
+        epochs.pick(picks_pe)
         
-        # Guardamos el promedio individual
-        evoked = epochs.average()
-        all_evokeds.append(evoked)
+        # Forzamos tipo EEG para usar drop_bad
+        epochs.set_channel_types({ch: 'eeg' for ch in picks_pe})
+        
+        # 2. CALCULAR UMBRAL ADAPTATIVO PARA PERIFÉRICOS
+        # Obtenemos el PTP (Peak-to-Peak) de cada época
+        data_pe = epochs.get_data() * 1e6
+        ptp_pe = np.ptp(data_pe, axis=2).max(axis=1) # El máximo de Erb o Axilla
+        
+        # Percentil 98 para eliminar solo los outliers extremos
+        # Suelo de 150µV para Gabrieli, 300µV para Wimmer (por la deriva)
+        min_thr = 150 if filt == "GABRIELI" else 350
+        thr_pe = max(np.percentile(ptp_pe, 98), min_thr)
+        
+        # Capamos el umbral para que no sea infinito si hay un cable suelto
+        if thr_pe > 1500: thr_pe = 1500
+
+        n_pre = len(epochs)
+        epochs.drop_bad(reject=dict(eeg=thr_pe * 1e-6), verbose=False)
+        
+        print(f">> {f_path.name} | Umbral: {thr_pe:.1f}µV | Supervivencia: {len(epochs)}/{n_pre}")
+        
+        # 3. Guardado con sufijo -epo.fif para evitar el warning de MNE
+        out_name = f"CLEANED_{ref}_{filt}_{f_path.stem}_PERIPH-epo.fif"
+        epochs.save(OUT_DIR / out_name, overwrite=True, verbose=False)
         
         del epochs
         gc.collect()
 
-    # Combinamos todos los promedios pesados por su número de épocas
-    # Esto es exactamente lo mismo que promediar el archivo concatenado
-    grand_average = mne.combine_evoked(all_evokeds, weights='nave')
-
-    # Guardamos el resultado final
-    out_name = f"GRAND_AVERAGE_{ref_type}_{filter_type}-ave.fif"
-    grand_average.save(OUT_DIR / out_name, overwrite=True)
-    
-    print(f"\n[OK] ÉXITO TOTAL:")
-    print(f"     - Archivo guardado: {out_name}")
-    print(f"     - Épocas totales analizadas: {total_epochs_count}")
-
 if __name__ == "__main__":
-    generate_grand_average_safe(FILTRO, REF)
+    process_peripheral_adaptive()
