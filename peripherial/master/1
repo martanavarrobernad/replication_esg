@@ -26,7 +26,7 @@ GROUPS = {
 
 EPOCH_VIEW_MS = (-10.0, 15.0)
 
-# Triggers Lateralización
+# Triggers
 TRIG_IZQ = [109, 125, 101, 117, 105, 108, 113, 116, 97, 100, 121, 124, 73, 76, 81, 84, 85, 77, 93, 65, 68, 69, 89, 92]
 TRIG_DER = [173, 189, 165, 181, 161, 164, 185, 188, 169, 172, 177, 180, 141, 137, 140, 145, 148, 149, 129, 132, 133, 153, 156, 157]
 
@@ -54,7 +54,7 @@ def get_group_avg(raw, events, event_id, trigger_list, channel_list, t_info):
     return avg_sum / count if count > 0 else None
 
 def interactive_selection(t_ms, data_dict, run_name):
-    """Muestra 5 subplots para una inspección quirúrgica del artefacto."""
+    """5 subplots."""
     plt.ion()
     fig, axes = plt.subplots(5, 1, figsize=(12, 16), sharex=True)
     
@@ -74,8 +74,8 @@ def interactive_selection(t_ms, data_dict, run_name):
         ax.grid(True, alpha=0.2)
 
     axes[4].set_xlabel("Time (ms)")
-    print(f"\n[!] INSTRUCCIÓN: Mira el final del artefacto en TH6 frente a AC.")
-    print(f"Haz CLICK en el START y END global (la ventana que cubra a todos).")
+    print(f"\n[!] Look at the end of the TH6 artifact vs AC.")
+    print(f" CLICK at START ang global END.")
     
     pts = plt.ginput(2, timeout=-1)
     plt.close(fig)
@@ -85,23 +85,22 @@ def interactive_selection(t_ms, data_dict, run_name):
     return xs[0], xs[1]
 
 def main():
-    # MODIFICACIÓN AQUÍ: Filtro estricto para coger solo .vhdr crudos
+    # Filter to only take raw vhdr
     vhdr_files = sorted([
         f for f in SUBJECT_DIR.glob("*.vhdr") 
         if "Run" in f.name 
-        and "Rest" not in f.name       # Ignora grabaciones de reposo
-        and "NoStim" not in f.name    # Ignora archivos ya interpolados
-        and "Ref" not in f.name       # Ignora archivos ya re-referenciados
+        and "Rest" not in f.name      
+        and "NoStim" not in f.name   
+        and "Ref" not in f.name       
     ])
     
     if not vhdr_files:
-        print(f"No se encontraron archivos .vhdr originales en: {SUBJECT_DIR}")
+        print(f"not found: {SUBJECT_DIR}")
         return
 
     rows = []
     for vhdr in vhdr_files:
-        print(f"\n>> Procesando ORIGINAL: {vhdr.name}")
-        # El resto del código sigue igual...
+        print(f"\n>> Processing: {vhdr.name}")
         raw = mne.io.read_raw_brainvision(vhdr, preload=True, verbose=False)
         events, event_id = mne.events_from_annotations(raw, verbose=False)
         
@@ -120,11 +119,11 @@ def main():
         
         if start_ms is not None:
             rows.append({"run": vhdr.name, "start_ms": start_ms, "end_ms": end_ms})
-            print(f"   [OK] Guardado: {start_ms:.2f} a {end_ms:.2f} ms")
+            print(f"   SAved: {start_ms:.2f} to {end_ms:.2f} ms")
 
     if rows:
         pd.DataFrame(rows).to_csv(OUT_CSV, index=False)
-        print(f"\nCSV DETALLADO generado en: {OUT_CSV}")
+        print(f"\nCSV in: {OUT_CSV}")
 
 if __name__ == "__main__":
     main()
