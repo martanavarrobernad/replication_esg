@@ -12,16 +12,15 @@ import re
 from pathlib import Path
 import gc
 
-# =============================================================================
-# CONFIGURACIÓN (Baseline -800ms + ECG Gating)
-# =============================================================================
+# Configuration
 SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+#Baseline of -800 to 0ms and epochs of -850 to 600ms
 
 TMIN, TMAX = -0.850, 0.600  
 BASELINE = (-0.800, 0.000) 
 SUFFIX = "_BL800_COMPLEMENTARY"
 
-# DICCIONARIO COMPLETO (48 Triggers estructurados por Run)
+# Triggers definition
 BLOCK_TRIGGERS = {
     # --- INATTENTIVE ---
     1: { # right x x right right
@@ -60,20 +59,19 @@ BLOCK_TRIGGERS = {
 }
 
 def run_step3_final():
-    # Buscamos archivos .fif (Continuous) que salieron de la re-referencia
     input_files = sorted([
         f for f in SUBJECT_DIR.glob("*_Ref*.fif") 
         if "-epo.fif" not in f.name and "NoStimArtifact" in f.name
     ])
     
-    print(f"--- INICIANDO GATING + EPOCHING (48 TRIGGERS) ---")
+    print(f"--- Gating+epoching ---")
     
     if not input_files:
-        print("ERROR: No se encontraron archivos continuos válidos.")
+        print("ERROR: Not found.")
         return
 
     for f_path in input_files:
-        # Extraer Run y Referencia del nombre del archivo
+        # Extract Run and ref
         match = re.search(r'Run(\d+).*Ref(\w+)', f_path.name)
         if not match: continue
             
@@ -83,65 +81,64 @@ def run_step3_final():
         if run_idx not in BLOCK_TRIGGERS: continue
             
         target_dict = BLOCK_TRIGGERS[run_idx]
-        print(f"\n>> Procesando Run {run_idx} | Ref: {ref_type}")
+        print(f"\n>> Processing Run {run_idx} | Ref: {ref_type}")
 
         try:
-            # 1. CARGA
+            # 1. Charge
             raw = mne.io.read_raw_fif(f_path, preload=True, verbose=False)
             events, _ = mne.events_from_annotations(raw, verbose=False)
             
-            # 2. MAPEADO DE EVENTOS
-            # Invertimos el diccionario para que MNE asocie el código con el nombre
+            # 2. Event mapping
             current_event_id = {name: code for name, code in target_dict.items() if code in events[:, 2]}
             
             if not current_event_id:
                 print(f"   Aviso: No se encontraron los triggers del bloque en {f_path.name}")
                 continue
 
-            # 3. EPOCHING
+            # 3. Epoching
             epochs = mne.Epochs(raw, events, event_id=current_event_id, 
                                 tmin=TMIN, tmax=TMAX, baseline=BASELINE, 
                                 preload=True, verbose=False)
             
             n_initial = len(epochs)
 
-            # 4. ECG GATING (Rechazo de épocas que coinciden con el latido)
+            # 4. Ecg gating (rejection of all epochs at the same time as a heartbeat)
             if 'ECG' in raw.ch_names:
-                # Detectamos picos R
+                # R peak detection
                 ecg_events, _, _ = mne.preprocessing.find_ecg_events(raw, ch_name='ECG', verbose=False)
                 
                 sr = raw.info['sfreq']
                 win_samples = int(0.150 * sr) # Ventana de 150ms
                 
-                # Creamos una máscara de muestras "prohibidas"
+                # Mask of bad samples
                 bad_samples = set()
                 for r_peak in ecg_events[:, 0]:
                     bad_samples.update(range(r_peak - win_samples, r_peak + win_samples))
                 
-                # Buscamos qué triggers caen dentro de la máscara
+                # Triggers inside mask 
                 epochs_to_drop = [i for i, smp in enumerate(epochs.events[:, 0]) if smp in bad_samples]
                 
                 if epochs_to_drop:
                     pct = (len(epochs_to_drop) / n_initial) * 100
-                    print(f"   -> ECG Gating: Eliminando {len(epochs_to_drop)} épocas ({pct:.2f}%)")
+                    print(f"   -> ECG Gating: Rejecting {len(epochs_to_drop)} epochs ({pct:.2f}%)")
                     epochs.drop(epochs_to_drop, reason='ECG_coincidence', verbose=False)
                 else:
-                    print("   -> ECG Gating: 0 épocas eliminadas.")
+                    print("   -> ECG Gating: 0 epochs rejected.")
 
-            # 5. GUARDADO FINAL
+            # 5. Save
             out_name = f"Clean_Epochs_Run{run_idx}_Ref{ref_type}{SUFFIX}-epo.fif"
             epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=False)
             
-            print(f"   -> Guardado: {out_name} | Épocas finales: {len(epochs)}")
+            print(f"   -> Saved: {out_name} | Final epochs: {len(epochs)}")
 
-            # Limpieza RAM
+            # Clean RAM
             del raw, epochs
             gc.collect()
 
         except Exception as e:
-            print(f"   !!! ERROR en Run {run_idx}: {e}")
+            print(f"   !!! ERROR in Run {run_idx}: {e}")
 
-    print("\n--- PROCESO COMPLETADO: ÉPOCAS LIMPIAS GENERADAS ---")
+    print("\n--- Process completed ---")
 
 if __name__ == "__main__":
     run_step3_final()
