@@ -13,9 +13,7 @@ from scipy.interpolate import PchipInterpolator
 import gc
 import matplotlib.pyplot as plt
 
-# =============================================================================
-# CONFIGURACIÓN Y GRUPOS (TU MONTAJE ESPECÍFICO)
-# =============================================================================
+# Configuration
 SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
 CFG_WIN_CSV = SUBJECT_DIR / "tiempos_artefacto_DETALLADO.csv"
 
@@ -28,20 +26,17 @@ GROUPS = {
                "S11", "S12", "S13", "S14", "S15", "S16", "S17", "S18", "S19", "SC6"]
 }
 
-# Creamos una lista plana de todos los canales a limpiar para la función
+# Crete a list
 CHANNELS_TO_CLEAN = [ch for group in GROUPS.values() for ch in group]
 
 N_PAD = 5 
 
-# =============================================================================
-# FUNCIONES
-# =============================================================================
+# Functions
 
 def interpolate_stim_artifact(raw, onsets_sec, start_ms, end_ms, picks, n_pad=5):
     sf = raw.info["sfreq"]
     data = raw._data 
     
-    # Solo procesamos los canales que existen en el archivo y están en nuestra lista
     ch_indices = [raw.ch_names.index(ch) for ch in picks if ch in raw.ch_names]
     
     s0 = int(round(start_ms / 1000 * sf))
@@ -81,9 +76,7 @@ def plot_verification(t_ms, before, after, run_name):
     plt.savefig(out_img, dpi=150, bbox_inches='tight')
     plt.close(fig)
 
-# =============================================================================
-# MAIN
-# =============================================================================
+# Main
 
 def main():
     if not CFG_WIN_CSV.exists():
@@ -96,29 +89,29 @@ def main():
         vhdr_path = SUBJECT_DIR / row['run']
         if not vhdr_path.exists(): continue
         
-        print(f"\n>>> Interpolando grupos (Axilla, Erb, Refs, Spinal) en: {vhdr_path.name}")
+        print(f"\n>>> Interpolating in: {vhdr_path.name}")
         
         raw = mne.io.read_raw_brainvision(vhdr_path, preload=True, verbose=False)
         
-        # Filtramos los canales presentes en este archivo específico
+        # Filter channels
         present_picks = [ch for ch in CHANNELS_TO_CLEAN if ch in raw.ch_names]
 
-        # Eventos
+        # Events
         events, event_id = mne.events_from_annotations(raw, verbose=False)
         stim_codes = [v for k, v in event_id.items() if "Stimulus/S" in k]
         onsets = events[np.isin(events[:, 2], stim_codes)][:, 0] / raw.info["sfreq"]
 
-        # Snapshot ANTES (solo de los canales seleccionados)
+        # Snapshot before
         epochs = mne.Epochs(raw, events, event_id=None, tmin=-0.01, tmax=0.02, 
                             picks=present_picks, baseline=None, preload=True, verbose=False)
         before_avg = epochs.average().data.mean(axis=0)
         t_ms = epochs.times * 1000
 
-        # Interpolación dirigida
-        print(f"   Limpiando {len(present_picks)} canales clave...")
+        # Interpolation
+        print(f"   Cleaning {len(present_picks)} channels...")
         interpolate_stim_artifact(raw, onsets, row['start_ms'], row['end_ms'], present_picks, N_PAD)
 
-        # Snapshot DESPUÉS
+        # Snapshot after
         epochs_after = mne.Epochs(raw, events, event_id=None, tmin=-0.01, tmax=0.02, 
                                   picks=present_picks, baseline=None, preload=True, verbose=False)
         after_avg = epochs_after.average().data.mean(axis=0)
@@ -128,12 +121,12 @@ def main():
         out_name = SUBJECT_DIR / f"{vhdr_path.stem}_NoStimArtifact.fif"
         raw.save(out_name, overwrite=True, verbose=False)
         
-        print(f"   [OK] Guardado: {out_name.name}")
+        print(f"   Saved: {out_name.name}")
         
         del raw, epochs, epochs_after, before_avg, after_avg
         gc.collect()
 
-    print("\n--- Proceso completado: EEG ignorado, ESG/ENG/Refs limpios ---")
+    print("\n--- Process completed ---")
 
 if __name__ == "__main__":
     main()
