@@ -2,18 +2,13 @@ import mne
 import numpy as np
 from pathlib import Path
 import gc
-import os
 
 # =============================================================================
-# CONFIGURACIÓN DE RUTAS
+# CONFIGURACIÓN
 # =============================================================================
 BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
 INPUT_FILES = sorted(list(BASE_DIR.glob("*_GABRIELI-epo.fif")) + list(BASE_DIR.glob("*_WIMMER-epo.fif")))
-
-TEMP_DIR = BASE_DIR / "TEMP_CHUNKS"
 OUT_DIR = BASE_DIR / "CLEAN_EPOCHS_FINAL"
-
-TEMP_DIR.mkdir(exist_ok=True, parents=True)
 OUT_DIR.mkdir(exist_ok=True, parents=True)
 
 # Canales
@@ -22,87 +17,68 @@ CH_ESG_BASE = ['Iz', 'SC1', 'SC6', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',
 CH_ERB = 'ENG_ERB'
 CH_AXI = 'ENG_AXILLA'
 
-def get_thr(epochs, ch_type, minimum):
+def get_adaptive_thr(epochs, ch_type, min_val):
+    """Calcula el umbral adaptativo (Percentil 98)."""
     try:
         data = epochs.get_data(picks=ch_type)
-        if data.size == 0: return minimum
+        if data.size == 0: return min_val
+        # Calculamos el Peak-to-Peak (PTP) de cada época
         p2ps = (np.max(data, axis=2) - np.min(data, axis=2)).max(axis=1) * 1e6
-        return max(np.percentile(p2ps, 98), minimum)
+        # El 98% de las épocas están por debajo de este valor
+        val_98 = np.percentile(p2ps, 98)
+        return max(val_98, min_val)
     except:
-        return minimum
+        return min_val
 
-def survival_cleaning_robust():
+def survival_cleaning_by_ref():
     if not INPUT_FILES:
-        print("[-] No hay archivos para limpiar.")
+        print("[-] No se encontraron archivos.")
         return
 
     for f_path in INPUT_FILES:
+        # Detectamos la referencia por el nombre del archivo
+        ref_type = "TH6" if "RefTH6" in f_path.name else "AC" if "RefAC" in f_path.name else "Unknown"
+        filter_type = "GABRIELI" if "GABRIELI" in f_path.name else "WIMMER"
+        
         print(f"\n" + "="*60)
         print(f"PROCESANDO: {f_path.name}")
+        print(f"REFERENCIA: {ref_type} | FILTRO: {filter_type}")
         print("="*60)
+
+        # 1. Cargar el Run (preload=True para calcular umbrales)
+        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
         
-        epochs_raw = mne.read_epochs(f_path, preload=False, verbose=False)
-        total_epochs_original = len(epochs_raw)
-        chunk_size = 400 
-        chunk_files = []
-        original_types = {ch: epochs_raw.get_channel_types(picks=[ch])[0] for ch in epochs_raw.ch_names}
+        # 2. Mapeo de canales
+        mapping = {ch: ('eeg' if ch in CH_ESG_BASE else 'emg' if ch == CH_ERB else 'eog' if ch == CH_AXI else 'misc') 
+                   for ch in epochs.ch_names}
+        epochs.set_channel_types(mapping, verbose=False)
+
+        # 3. Cálculo de umbrales adaptativos reales de este Run
+        # Si es AC, el ruido suele ser mayor (por el corazón), el percentil 98 lo captará.
+        t_esg = get_adaptive_thr(epochs, 'eeg', 80)
+        t_erb = get_adaptive_thr(epochs, 'emg', 150)
+        t_axi = get_adaptive_thr(epochs, 'eog', 200)
+
+        print(f" >> Umbrales Adaptativos: ESG {t_esg:.1f}µV | ERB {t_erb:.1f}µV | AXI {t_axi:.1f}µV")
+
+        # 4. Ejecutar el hachazo (Rejection)
+        n_antes = len(epochs)
+        epochs.drop_bad(reject={
+            'eeg': t_esg * 1e-6, 
+            'emg': t_erb * 1e-6, 
+            'eog': t_axi * 1e-6
+        }, verbose=False)
+        n_despues = len(epochs)
         
-        epochs_restantes_total = 0
+        print(f" >> Limpieza: Eliminadas {n_antes - n_despues} épocas ruidosas.")
+        print(f" >> Supervivencia: {n_despues}/{n_antes} ({n_despues/n_antes*100:.1f}%)")
 
-        for i, start in enumerate(range(0, total_epochs_original, chunk_size)):
-            stop = min(start + chunk_size, total_epochs_original)
-            chunk = epochs_raw[start:stop].load_data()
-            n_inicial = len(chunk)
-            
-            # Mapping
-            mapping = {ch: ('eeg' if ch in CH_ESG_BASE else 'emg' if ch == CH_ERB else 'eog' if ch == CH_AXI else 'misc') 
-                       for ch in chunk.ch_names}
-            chunk.set_channel_types(mapping, verbose=False)
-
-            # Umbrales
-            t_esg = get_thr(chunk, 'eeg', 100)
-            t_erb = get_thr(chunk, 'emg', 250)
-            t_axi = get_thr(chunk, 'eog', 400)
-
-            # Rejection
-            chunk.drop_bad(reject={'eeg': t_esg*1e-6, 'emg': t_erb*1e-6, 'eog': t_axi*1e-6}, verbose=False)
-            
-            n_final = len(chunk)
-            epochs_restantes_total += n_final
-            
-            # OUTPUT POR BLOQUE
-            print(f" Block {i+1} ({start}-{stop}):")
-            print(f"   - Umbrales: ESG={t_esg:.1f}µV | ERB={t_erb:.1f}µV | AXI={t_axi:.1f}µV")
-            print(f"   - Eliminadas: {n_inicial - n_final} épocas (Quedan {n_final}/{n_inicial})")
-            
-            # Limpieza para evitar errores de concatenación
-            chunk.set_channel_types(original_types, verbose=False)
-            chunk.reject = None
-            chunk.flat = None
-
-            chunk_path = TEMP_DIR / f"{f_path.stem}_chunk_{i}-epo.fif"
-            chunk.save(chunk_path, overwrite=True, verbose=False)
-            chunk_files.append(chunk_path)
-            
-            del chunk
-            gc.collect()
-
-        # Concatenación final
-        try:
-            print(f"\n[+] Uniendo bloques de {f_path.stem}...")
-            all_chunks = [mne.read_epochs(f, preload=True, verbose=False) for f in chunk_files]
-            final_epochs = mne.concatenate_epochs(all_chunks)
-            
-            out_name = OUT_DIR / f"{f_path.stem}_CLEANED-epo.fif"
-            final_epochs.save(out_name, overwrite=True, verbose=False)
-            
-            print(f" >> RESULTADO FINAL: {epochs_restantes_total} épocas de {total_epochs_original} originales.")
-            print(f" >> Archivo guardado: {out_name.name}")
-            
-            for f in chunk_files: os.remove(f)
-            
-        except Exception as e:
-            print(f" !! Error concatenando: {e}")
+        # 5. Guardar con nombre ultra-claro
+        out_name = f"CLEANED_{ref_type}_{filter_type}_{f_path.stem}.fif"
+        epochs.save(OUT_DIR / out_name, overwrite=True, verbose=False)
+        
+        del epochs
+        gc.collect()
 
 if __name__ == "__main__":
-    survival_cleaning_robust()
+    survival_cleaning_by_ref()
