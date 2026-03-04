@@ -2,9 +2,7 @@ import mne
 import gc
 from pathlib import Path
 
-# =============================================================================
-# CONFIGURACIÓN DE FILTROS ESPECÍFICOS
-# =============================================================================
+# Configuration
 # 1. GABRIELI (Early Components)
 GAB_HP, GAB_LP = 50.0, 800.0
 
@@ -13,24 +11,21 @@ WIM_HP, WIM_LP = 0.5, 60.0
 
 SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
 
-# En el script de filtrado (Paso 1), cambia la línea del glob por esta:
 def process_filters():
-    # Buscamos exactamente el nombre que sale del Gating
     epo_files = sorted(list(SUBJECT_DIR.glob("Clean_Epochs_*_Ref*_BL800_COMPLEMENTARY-epo.fif")))
     
     if not epo_files:
-        print(f"ERROR: No se encontraron archivos en {SUBJECT_DIR}")
-        print("Intentaste buscar: Clean_Epochs_*_Ref*_BL800_COMPLEMENTARY-epo.fif")
+        print(f"ERROR: not found {SUBJECT_DIR}")
         return
 
     for f_path in epo_files:
-        print(f"\n--- Generando ramas de filtrado: {f_path.name} ---")
+        print(f"\n--- Generating filter pathways: {f_path.name} ---")
         
-        # Cargar épocas (sin limpieza rudimentaria aquí)
+        # Epochs
         epochs = mne.read_epochs(f_path, preload=True, verbose=False)
 
-        # --- RAMA GABRIELI (FIR) ---
-        print(f"   -> Aplicando Gabrieli (FIR {GAB_HP}-{GAB_LP} Hz)")
+        # GABRIELI (FIR)
+        print(f"   -> Gabrieli (FIR {GAB_HP}-{GAB_LP} Hz)")
         epochs_gab = epochs.copy().filter(
             l_freq=GAB_HP, 
             h_freq=GAB_LP, 
@@ -44,8 +39,8 @@ def process_filters():
         out_gab = SUBJECT_DIR / f"{f_path.stem}_GABRIELI-epo.fif"
         epochs_gab.save(out_gab, overwrite=True, verbose=False)
 
-        # --- RAMA WIMMER (IIR) ---
-        print(f"   -> Aplicando Wimmer (IIR Order 3 {WIM_HP}-{WIM_LP} Hz)")
+        # WIMMER (IIR)
+        print(f"   ->  Wimmer (IIR Order 3 {WIM_HP}-{WIM_LP} Hz)")
         iir_params = dict(order=3, ftype='butter', output='sos')
         epochs_wim = epochs.copy().filter(
             l_freq=WIM_HP, 
@@ -60,7 +55,7 @@ def process_filters():
         del epochs, epochs_gab, epochs_wim
         gc.collect()
 
-    print("\n--- RAMAS GABRIELI Y WIMMER CREADAS ---")
+    print("\n--- GABRIELI and WIMMER created ---")
 
 if __name__ == "__main__":
     process_filters()
