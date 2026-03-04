@@ -1,104 +1,71 @@
 import mne
-import matplotlib.pyplot as plt
-from pathlib import Path
 import gc
-import numpy as np
+from pathlib import Path
 
 # =============================================================================
-# CONFIGURACIÓN
+# Harcoded porque se me congelaba spyder todo el rato si lo intentaba hacer manual 
 # =============================================================================
+FILTRO = "GABRIELI"  # Opciones: "GABRIELI" o "WIMMER"
+REF = "TH6"         # Opciones: "TH6" o "AC"
+
+# Rutas
 BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
-INPUT_DIR = BASE_DIR / "CLEAN_EPOCHS_FINAL"
-REFERENCE = "TH6"
+CLEAN_DIR = BASE_DIR / "CLEAN_EPOCHS_FINAL"
+OUT_DIR = BASE_DIR / "COMBINED_FILES"
+OUT_DIR.mkdir(exist_ok=True, parents=True)
 
-# Montaje personalizado
-SPINAL_CH_LIST = ["Iz", "SC1", "S3", "S6", "SC6", "S14", "S18", "S7", "S11", "S15", "S19", "S5", "S9", "S13", "S17", "S4", "S8", "S12", "S16"]
-CONTROL_CH = ["ENG_ERB", "ENG_AXILLA"]
+def run_safe_concatenation(filter_type, ref_type):
+    # 1. Buscar los archivos CLEANED específicos
+    pattern = f"CLEANED_{ref_type}_{filter_type}_*.fif"
+    files = sorted(list(CLEAN_DIR.glob(pattern)))
 
-def generate_grand_average(filter_type="GABRIELI"):
-    """
-    Carga archivos CLEANED, promedia individualmente y combina.
-    """
-    # Buscamos los archivos terminados en CLEANED-epo.fif
-    file_list = sorted(list(INPUT_DIR.glob(f"*{filter_type}*CLEANED-epo.fif")))
-    
-    if not file_list:
-        print(f"[-] No se encontraron archivos para {filter_type} en {INPUT_DIR}")
+    if not files:
+        print(f"[-] No se encontraron archivos para {ref_type} - {filter_type}")
         return
 
-    print(f"\n[+] Procesando {len(file_list)} archivos de {filter_type}...")
-    
-    all_evokeds = []
-    total_epochs = 0
+    print(f"\n[+] INICIANDO CONCATENACIÓN: {filter_type} | REF: {ref_type}")
+    print(f"    Archivos a unir: {len(files)}")
 
-    for f_path in file_list:
-        print(f"    Cargando: {f_path.name}")
+    # 2. Cargar el primer archivo como base del bloque
+    print(f"    -> Cargando base: {files[0].name}")
+    combined = mne.read_epochs(files[0], preload=True, verbose=False)
+    
+    # Unificamos IDs y reseteamos metadatos de rechazo para evitar errores de MNE
+    combined.events[:, 2] = 1
+    combined.event_id = {'All_Stimuli': 1}
+    combined.reject = None
+    combined.flat = None
+
+    # 3. Bucle de anexión uno a uno
+    for f_path in files[1:]:
+        print(f"    -> Añadiendo: {f_path.name}")
+        temp_epo = mne.read_epochs(f_path, preload=True, verbose=False)
         
-        # 1. Cargamos el archivo (Sin argumentos extra para evitar TypeError)
-        epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+        # Sincronizar metadatos antes de unir
+        temp_epo.events[:, 2] = 1
+        temp_epo.event_id = {'All_Stimuli': 1}
+        temp_epo.reject = None
+        temp_epo.flat = None
         
-        # 2. Limpieza de seguridad: borramos rastro de rechazo (EOG/EMG)
-        epochs.reject = None
-        epochs.flat = None
+        # Concatenar al bloque principal
+        combined = mne.concatenate_epochs([combined, temp_epo], on_mismatch='ignore')
         
-        total_epochs += len(epochs)
-        
-        # 3. Promediamos el archivo y lo guardamos en la lista
-        all_evokeds.append(epochs.average())
-        
-        # 4. Liberamos RAM
-        del epochs
+        # LIBERACIÓN TOTAL DE RAM del archivo temporal
+        del temp_epo
         gc.collect()
 
-    # 5. Combinamos todos los promedios (Grand Average)
-    grand_average = mne.combine_evoked(all_evokeds, weights='nave')
+    # 4. Guardar el archivo gigante resultante
+    out_name = f"FULL_COMBINED_{ref_type}_{filter_type}-epo.fif"
+    print(f"\n[!] Guardando archivo final: {out_name}...")
     
-    # Aplicamos baseline de visualización (-10ms a 0ms)
-    grand_average.apply_baseline((-0.010, 0))
-
-    # --- CONFIGURACIÓN DE GRÁFICA ---
-    if filter_type == "GABRIELI":
-        tmin_p, tmax_p = -0.010, 0.050 
-        ylim_p = (-5, 5)
-    else:
-        tmin_p, tmax_p = -0.050, 0.500 
-        ylim_p = (-12, 12)
-
-    # --- PLOTTING ---
-    plt.figure(figsize=(10, 6))
-    picks_spinal = [c for c in SPINAL_CH_LIST if c in grand_average.ch_names]
+    # Usamos verbose=True para ver el progreso del guardado en disco
+    combined.save(OUT_DIR / out_name, overwrite=True, verbose=True)
     
-    # Cortamos la ventana de tiempo para el zoom
-    ga_zoom = grand_average.copy().crop(tmin_p, tmax_p)
-    times = ga_zoom.times * 1000 # Pasar a ms
+    print(f" >> ÉXITO: {out_name} creado con {len(combined)} épocas.")
     
-    # 1. Butterfly Plot (Gris)
-    data_spinal = ga_zoom.copy().pick(picks_spinal).data * 1e6
-    for i in range(data_spinal.shape[0]):
-        plt.plot(times, data_spinal[i, :], color='gray', alpha=0.3, lw=0.7)
-    
-    # 2. Media Espinal (Rojo)
-    plt.plot(times, data_spinal.mean(axis=0), color='red', lw=2.5, label='MEDIA ESPINAL')
-    
-    # 3. Controles (Erb / Axilla)
-    colors = ['blue', 'green']
-    for i, ctrl in enumerate(CONTROL_CH):
-        if ctrl in grand_average.ch_names:
-            data_ctrl = ga_zoom.copy().pick(ctrl).data[0] * 1e6
-            plt.plot(times, data_ctrl, color=colors[i % 2], lw=2, label=ctrl)
-
-    plt.axvline(0, color='black', linestyle='--', lw=1.5, label='Stimulus')
-    
-    plt.ylim(ylim_p)
-    plt.title(f"Grand Average {filter_type} | Ref: {REFERENCE}\nn={total_epochs} épocas", fontweight='bold')
-    plt.legend(loc='upper right')
-    plt.grid(True, alpha=0.2)
-    
-    # Guardar PNG
-    plt.savefig(INPUT_DIR / f"Plot_GA_{filter_type}_{REFERENCE}.png", dpi=200)
-    plt.show()
+    # Limpiar RAM final
+    del combined
+    gc.collect()
 
 if __name__ == "__main__":
-    # Generamos los promedios finales para ambas ramas
-    generate_grand_average("GABRIELI")
-    generate_grand_average("WIMMER")
+    run_safe_concatenation(FILTRO, REF)
