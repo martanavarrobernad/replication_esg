@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  6 15:38:19 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN TOPOGRÁFICA
+# =============================================================================
+FILTRO = "GABRIELI" 
+REF = "TH6"
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_DIR = BASE_DIR / "GRAND_AVERAGES_FINAL"
+
+# Tu montaje personalizado ordenado de arriba a abajo para el eje Y
+CH_ORDER = ["Iz", "SC1", "S3", "S5", "S7", "S4", "S8", "S6", "S9", "S11", 
+            "SC6", "S13", "S15", "S14", "S17", "S19", "S12", "S16", "S18"]
+
+def plot_spinal_heatmap(filt, ref):
+    # 1. Cargar GAs
+    path_sp = GA_DIR / f"GA_SPINALS_{ref}_{filt}-ave.fif"
+    path_re = GA_DIR / f"GA_REST_SPINALS_{ref}_{filt}-ave.fif"
+    
+    if not path_sp.exists() or not path_re.exists():
+        print("[-] Faltan archivos de Grand Average para el Heatmap.")
+        return
+
+    ga_sp = mne.read_evokeds(path_sp, verbose=False)[0]
+    ga_re = mne.read_evokeds(path_re, verbose=False)[0]
+
+    # 2. Ventana temporal (Foco en la N13: 5ms a 30ms)
+    tmin, tmax = 0.005, 0.035
+    ga_sp.crop(tmin, tmax)
+    ga_re.crop(tmin, tmax)
+    times = ga_sp.times * 1000
+
+    # 3. Extraer datos en el orden vertical de la médula
+    def get_heatmap_matrix(evoked):
+        picks = [ch for ch in CH_ORDER if ch in evoked.ch_names]
+        data = evoked.copy().pick(picks).data * 1e6 # Convertir a uV
+        return data, picks
+
+    data_sp, labels = get_heatmap_matrix(ga_sp)
+    data_re, _ = get_heatmap_matrix(ga_re)
+
+    # --- FIGURA ---
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 8), sharey=True)
+    
+    # Escala de color simétrica (vmax ajustado a tus niveles de uV)
+    v_lim = np.max(np.abs(data_sp)) * 0.8
+    
+    # Heatmap SSEP
+    im1 = ax1.imshow(data_sp, aspect='auto', origin='upper', 
+                     extent=[times[0], times[-1], len(labels), 0],
+                     cmap='RdBu_r', vmin=-v_lim, vmax=v_lim)
+    ax1.set_title(f"TOPOGRAFÍA SSEP ({filt})", fontweight='bold')
+    ax1.set_xlabel("Tiempo (ms)")
+    ax1.set_yticks(np.arange(len(labels)))
+    ax1.set_yticklabels(labels)
+
+    # Heatmap REST (Misma escala para comparar)
+    im2 = ax2.imshow(data_re, aspect='auto', origin='upper', 
+                     extent=[times[0], times[-1], len(labels), 0],
+                     cmap='RdBu_r', vmin=-v_lim, vmax=v_lim)
+    ax2.set_title(f"TOPOGRAFÍA REST (Noise Floor)", fontweight='bold')
+    ax2.set_xlabel("Tiempo (ms)")
+
+    # Colorbar
+    cbar = fig.colorbar(im1, ax=[ax1, ax2], label="Amplitud (µV)")
+    
+    plt.suptitle(f"Validación Espacial del Potencial Evocado - Ref: {ref}", fontsize=16)
+    plt.show()
+
+if __name__ == "__main__":
+    plot_spinal_heatmap(FILTRO, REF)
