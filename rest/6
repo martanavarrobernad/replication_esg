@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  6 15:31:28 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN ZOOM (Eje Y: 1 a -1)
+# =============================================================================
+FILTRO = "GABRIELI"  # Prueba con "GABRIELI" o "WIMMER"
+REF = "TH6"           
+YLIM = (-1, 1)       # <--- EL ZOOM QUE HAS PEDIDO
+
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_DIR = BASE_DIR / "GRAND_AVERAGES_FINAL"
+REST_SP_DIR = BASE_DIR / "CLEAN_EPOCHS_REST_SPINALS"
+
+CH_SPINAL = ['Iz', 'SC1', 'SC6', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 
+             'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S17', 'S18', 'S19']
+
+def load_rest_spinals(filt, ref):
+    ga_path = GA_DIR / f"GA_REST_SPINALS_{ref}_{filt}-ave.fif"
+    if ga_path.exists():
+        return mne.read_evokeds(ga_path, verbose=False)[0]
+    
+    # Si no existe, promedia y GUARDA para que no te de el aviso más
+    pattern = f"CLEANED_REST_{ref}_{filt}_*SPINALS-epo.fif"
+    files = sorted(list(REST_SP_DIR.glob(pattern)))
+    if not files: raise FileNotFoundError("No hay archivos en REST_SPINALS")
+    
+    evokeds = [mne.read_epochs(f, preload=True, verbose=False).average() for f in files]
+    for ev in evokeds: ev.set_channel_types({ch: 'eeg' for ch in ev.ch_names})
+    ga = mne.combine_evoked(evokeds, weights='nave')
+    ga.save(ga_path, overwrite=True, verbose=False)
+    return ga
+
+def plot_zoom_validation(filt, ref):
+    # Cargar SSEP y REST
+    ga_pe = mne.read_evokeds(GA_DIR / f"GA_PERIPHERAL_{ref}_{filt}-ave.fif", verbose=False)[0]
+    ga_sp = mne.read_evokeds(GA_DIR / f"GA_SPINALS_{ref}_{filt}-ave.fif", verbose=False)[0]
+    ga_pe_re = mne.read_evokeds(GA_DIR / f"GA_REST_PERIPHERAL_{ref}_{filt}-ave.fif", verbose=False)[0]
+    ga_sp_re = load_rest_spinals(filt, ref)
+
+    # Ventana temporal (GABRIELI corto / WIMMER largo)
+    tmin, tmax = (-0.010, 0.050) if filt == "GABRIELI" else (-0.050, 0.400)
+    
+    for g in [ga_pe, ga_sp, ga_pe_re, ga_sp_re]:
+        g.crop(tmin, tmax).apply_baseline((tmin, 0), verbose=False)
+    
+    times = ga_pe.times * 1000
+    fig, axes = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+    plt.subplots_adjust(hspace=0.3)
+
+    # Colores y Labels
+    params = [
+        ('ENG_AXILLA', 'seagreen', 'Nivel 1: AXILLA'),
+        ('ENG_ERB', 'royalblue', 'Nivel 2: ERB'),
+    ]
+
+    # Renderizar Periferia (Axilla y Erb)
+    for i, (ch, color, title) in enumerate(params):
+        axes[i].plot(times, ga_pe_re.copy().pick(ch).data[0]*1e6, color='silver', lw=1.2, label='Noise (Rest)')
+        axes[i].plot(times, ga_pe.copy().pick(ch).data[0]*1e6, color=color, lw=2, label='Signal (SSEP)')
+        axes[i].set_title(title, fontweight='bold')
+
+    # Renderizar Médula (Media de canales)
+    picks_sp = [c for c in CH_SPINAL if c in ga_sp.ch_names]
+    data_noise = ga_sp_re.copy().pick(picks_sp).data * 1e6
+    data_signal = ga_sp.copy().pick(picks_sp).data * 1e6
+    
+    n_mean, n_std = np.mean(data_noise, axis=0), np.std(data_noise, axis=0)
+    
+    axes[2].fill_between(times, n_mean - 2*n_std, n_mean + 2*n_std, color='gray', alpha=0.3, label='Noise Floor')
+    axes[2].plot(times, np.mean(data_signal, axis=0), color='crimson', lw=2.5, label='Spinal SSEP')
+    axes[2].set_title("Nivel 3: MÉDULA ESPINAL", fontweight='bold')
+
+    # Configuración de ejes (EL ZOOM)
+    for ax in axes:
+        ax.axvline(0, color='black', ls='--')
+        ax.set_ylim(YLIM) # <--- AQUÍ SE APLICA EL (-1, 1)
+        ax.set_ylabel("Amplitude (µV)")
+        ax.grid(True, alpha=0.2)
+        ax.legend(loc='upper right', fontsize='small')
+
+    plt.suptitle(f"ZOOM VALIDATION (-1 to 1 µV) | {filt} ({ref})", fontsize=14, fontweight='bold')
+    plt.xlabel("Time (ms)")
+    plt.show()
+
+if __name__ == "__main__":
+    plot_zoom_validation(FILTRO, REF)
