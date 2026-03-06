@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Validation Plot: SSEP vs Resting State (with Noise Tunnel)
+"""
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN
+# =============================================================================
+FILTRO = "GABRIELI"  # Prueba con "GABRIELI" o "WIMMER"
+REF = "TH6"           # "AC" o "TH6"
+
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_DIR = BASE_DIR / "GRAND_AVERAGES_FINAL"
+REST_SP_DIR = BASE_DIR / "CLEAN_EPOCHS_REST_SPINALS"
+
+CH_SPINAL = ['Iz', 'SC1', 'SC6', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9', 
+             'S11', 'S12', 'S13', 'S14', 'S15', 'S16', 'S17', 'S18', 'S19']
+
+def load_or_average_rest(filt, ref):
+    """Intenta cargar el GA de REST SPINALS, si no existe, lo crea al vuelo."""
+    ga_path = GA_DIR / f"GA_REST_SPINALS_{ref}_{filt}-ave.fif"
+    if ga_path.exists():
+        return mne.read_evokeds(ga_path, verbose=False)[0]
+    
+    # Si no existe el GA, promediamos los archivos de la carpeta CLEAN_EPOCHS_REST_SPINALS
+    print(f"[!] GA de REST SPINALS no encontrado. Promediando archivos de {REST_SP_DIR.name}...")
+    pattern = f"CLEANED_REST_{ref}_{filt}_*SPINALS-epo.fif"
+    files = sorted(list(REST_SP_DIR.glob(pattern)))
+    
+    if not files:
+        raise FileNotFoundError(f"No se encontraron archivos para promediar en {REST_SP_DIR}")
+    
+    evokeds = []
+    for f in files:
+        ev = mne.read_epochs(f, preload=True, verbose=False).average()
+        ev.set_channel_types({ch: 'eeg' for ch in ev.ch_names})
+        evokeds.append(ev)
+    return mne.combine_evoked(evokeds, weights='nave')
+
+def plot_final_validation(filt, ref):
+    try:
+        # Cargar SSEP
+        ga_pe = mne.read_evokeds(GA_DIR / f"GA_PERIPHERAL_{ref}_{filt}-ave.fif", verbose=False)[0]
+        ga_sp = mne.read_evokeds(GA_DIR / f"GA_SPINALS_{ref}_{filt}-ave.fif", verbose=False)[0]
+        
+        # Cargar REST
+        ga_pe_re = mne.read_evokeds(GA_DIR / f"GA_REST_PERIPHERAL_{ref}_{filt}-ave.fif", verbose=False)[0]
+        ga_sp_re = load_or_average_rest(filt, ref)
+
+        # Ventanas y Escalas
+        tmin, tmax, ylim = (-0.010, 0.050, (-5, 5)) if filt == "GABRIELI" else (-0.050, 0.400, (-15, 15))
+        
+        for g in [ga_pe, ga_sp, ga_pe_re, ga_sp_re]:
+            g.crop(tmin, tmax).apply_baseline((tmin, 0), verbose=False)
+        
+        times = ga_pe.times * 1000
+        fig, axes = plt.subplots(3, 1, figsize=(11, 13), sharex=True)
+        plt.subplots_adjust(hspace=0.35)
+
+        # PANEL 1: AXILLA
+        axes[0].plot(times, ga_pe_re.copy().pick('ENG_AXILLA').data[0]*1e6, color='silver', lw=1.5, label='Rest (Noise)')
+        axes[0].plot(times, ga_pe.copy().pick('ENG_AXILLA').data[0]*1e6, color='seagreen', lw=2, label='SSEP')
+        axes[0].set_title("Nivel 1: AXILLA", fontweight='bold')
+        axes[0].legend(loc='upper right')
+
+        # PANEL 2: ERB
+        axes[1].plot(times, ga_pe_re.copy().pick('ENG_ERB').data[0]*1e6, color='silver', lw=1.5)
+        axes[1].plot(times, ga_pe.copy().pick('ENG_ERB').data[0]*1e6, color='royalblue', lw=2)
+        axes[1].set_title("Nivel 2: PUNTO DE ERB", fontweight='bold')
+
+        # PANEL 3: MÉDULA (SSEP vs REST con túnel de ruido)
+        picks_sp = [c for c in CH_SPINAL if c in ga_sp.ch_names]
+        if picks_sp:
+            data_noise = ga_sp_re.copy().pick(picks_sp).data * 1e6
+            noise_mean = np.mean(data_noise, axis=0)
+            noise_std = np.std(data_noise, axis=0)
+
+            # Túnel de confianza (Ruido +/- 2 Desviaciones Estándar)
+            axes[2].fill_between(times, noise_mean - 2*noise_std, noise_mean + 2*noise_std, 
+                                 color='gray', alpha=0.3, label='Noise Floor (Rest)')
+            
+            # Señal SSEP
+            data_signal = ga_sp.copy().pick(picks_sp).data * 1e6
+            axes[2].plot(times, np.mean(data_signal, axis=0), color='crimson', lw=2.5, label='Spinal SSEP (N13)')
+            
+            axes[2].set_title("Nivel 3: MÉDULA ESPINAL (Validation)", fontweight='bold')
+            axes[2].legend(loc='upper right')
+
+        for ax in axes:
+            ax.axvline(0, color='black', ls='--')
+            ax.set_ylim(ylim)
+            ax.set_ylabel("µV")
+            ax.grid(True, alpha=0.2)
+
+        plt.suptitle(f"SSEP vs RESTING STATE - P02 - {filt} ({ref})", fontsize=14, fontweight='bold')
+        plt.xlabel("Tiempo (ms)")
+        plt.show()
+
+    except Exception as e:
+        print(f"[-] Error en visualización: {e}")
+
+if __name__ == "__main__":
+    plot_final_validation(FILTRO, REF)
