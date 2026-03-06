@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar 6 2026
+@author: marta.navarrobernad
+"""
+
+import mne
+import gc
+from pathlib import Path
+
+# =============================================================================
+# CONFIGURACIÓN DE FILTROS - EXCLUSIVO RESTING
+# =============================================================================
+GAB_HP, GAB_LP = 50.0, 800.0
+WIM_HP, WIM_LP = 0.5, 60.0
+
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+def process_resting_only_filters():
+    # 1. Búsqueda estricta de archivos de descanso
+    # Buscamos archivos que contengan "REST" y terminen en "-epo.fif"
+    all_fifs = sorted(list(SUBJECT_DIR.glob("*.fif")))
+    
+    # Filtramos: que tenga REST, que sea de referencia (Ref) y que NO esté ya filtrado
+    input_files = [
+        f for f in all_fifs 
+        if "REST" in f.name and 
+        ("RefAC" in f.name or "RefTH6" in f.name) and 
+        not any(x in f.name for x in ["GABRIELI", "WIMMER"])
+    ]
+    
+    if not input_files:
+        print(f"[-] No se han encontrado nuevos archivos de REST en {SUBJECT_DIR}")
+        return
+
+    print(f"--- Iniciando filtrado dual para {len(input_files)} archivos de RESTING ---")
+    for f in input_files:
+        print(f"  [+] A filtrar: {f.name}")
+
+    for f_path in input_files:
+        try:
+            print(f"\n>> Procesando Descanso: {f_path.name}")
+            epochs = mne.read_epochs(f_path, preload=True, verbose=False)
+
+            # --- RAMA GABRIELI ---
+            print(f"   -> Filtrando Gabrieli ({GAB_HP}-{GAB_LP} Hz)")
+            epochs_gab = epochs.copy().filter(l_freq=GAB_HP, h_freq=GAB_LP, method='fir', verbose=False)
+            out_gab = SUBJECT_DIR / f"{f_path.stem}_GABRIELI-epo.fif"
+            epochs_gab.save(out_gab, overwrite=True, verbose=False)
+
+            # --- RAMA WIMMER ---
+            print(f"   -> Filtrando Wimmer ({WIM_HP}-{WIM_LP} Hz)")
+            iir_params = dict(order=3, ftype='butter', output='sos')
+            epochs_wim = epochs.copy().filter(l_freq=WIM_HP, h_freq=WIM_LP, method='iir', iir_params=iir_params, verbose=False)
+            out_wim = SUBJECT_DIR / f"{f_path.stem}_WIMMER-epo.fif"
+            epochs_wim.save(out_wim, overwrite=True, verbose=False)
+
+            del epochs, epochs_gab, epochs_wim
+            gc.collect()
+            
+        except Exception as e:
+            print(f"   [!] Error en {f_path.name}: {e}")
+
+    print("\n" + "="*60)
+    print("--- FILTRADO DE RESTING FINALIZADO ---")
+    print("="*60)
+
+if __name__ == "__main__":
+    process_resting_only_filters()
