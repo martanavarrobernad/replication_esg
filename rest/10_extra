@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  6 16:24:52 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+from scipy.interpolate import griddata
+
+# =============================================================================
+# MONTAJE P02 (Mantenemos tu geometría perfecta)
+# =============================================================================
+SPINAL_EXTRA = {
+    "Iz":  [0.000, -0.090], "SC1": [0.000, -0.105], "S3":  [0.000, -0.120],
+    "S6":  [0.000, -0.1325], "S7":  [0.010, -0.145], "S5":  [-0.010, -0.145], 
+    "SC6": [0.000, -0.160], "S11": [0.010, -0.170], "S9":  [-0.010, -0.170], 
+    "S14": [0.000, -0.180], "S15": [0.010, -0.190], "S13": [-0.010, -0.190], 
+    "S18": [0.000, -0.200], "S19": [0.010, -0.210], "S17": [-0.010, -0.210],
+    "S4":  [-0.050, -0.1325], "S8":  [0.050, -0.1325], 
+    "S12": [-0.050, -0.190],  "S16": [0.050, -0.190],
+    "AC":  [0.050, -0.100],   "TH6": [0.000, -0.300]
+}
+
+for ch in SPINAL_EXTRA:
+    SPINAL_EXTRA[ch][1] -= 0.01
+
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_PATH = BASE_DIR / "GRAND_AVERAGES_FINAL" / "GA_SPINALS_TH6_GABRIELI-ave.fif"
+
+def plot_p22_polarity_map():
+    if not GA_PATH.exists():
+        print(f"[-] No se encuentra el archivo: {GA_PATH}")
+        return
+
+    evoked = mne.read_evokeds(GA_PATH, verbose=False)[0]
+    evoked.apply_baseline((0.000, 0.005), verbose=False)
+    
+    # --- VENTANA P22 (18-28 ms) ---
+    t_min, t_max = 0.018, 0.028
+    spinal_picks = [ch for ch in SPINAL_EXTRA.keys() if ch in evoked.ch_names]
+    
+    evoked_crop = evoked.copy().pick(spinal_picks).crop(t_min, t_max)
+    # Buscamos el máximo POSITIVO (P de P22)
+    t_idx = np.argmax(np.mean(evoked_crop.data, axis=0)) 
+    t_peak = evoked_crop.times[t_idx] 
+    
+    print(f"[+] Tiempo de máxima P22 identificado: {t_peak*1000:.1f} ms")
+
+    v_p22 = evoked.copy().pick(spinal_picks).crop(t_peak, t_peak).data.flatten() * 1e6
+    points = np.array([SPINAL_EXTRA[ch][:2] for ch in spinal_picks])
+
+    # Rejilla
+    grid_x, grid_y = np.mgrid[-0.06:0.06:200j, -0.25:-0.07:300j]
+    grid_z = griddata(points, v_p22, (grid_x, grid_y), method='cubic')
+
+    fig, ax = plt.subplots(figsize=(10, 14))
+    
+    # Escala de color para la P22
+    v_lim = np.max(np.abs(v_p22))
+    
+    # Mapa (Rojo = Positivo = P22)
+    im = ax.imshow(grid_z.T, extent=(-0.06, 0.06, -0.25, -0.07), origin='lower',
+                   cmap='RdBu_r', vmin=-v_lim, vmax=v_lim, aspect='auto', interpolation='bilinear')
+    
+    ax.contour(grid_x, grid_y, grid_z, levels=8, colors='black', linewidths=0.5, alpha=0.3)
+
+    for name, (pos_x, pos_y) in SPINAL_EXTRA.items():
+        if name in evoked.ch_names:
+            ax.add_patch(plt.Circle((pos_x, pos_y), 0.0018, color='white', ec='black', lw=1, zorder=5))
+            ax.text(pos_x, pos_y + 0.0035, name, fontsize=8, ha='center', fontweight='bold', zorder=6)
+
+    ax.set_title(f"MAPA DE POLARIDAD P22 (CORTICAL)\nSnapshot a los {t_peak*1000:.1f} ms | Filtro GABRIELI", 
+                 fontsize=14, fontweight='bold', pad=20)
+    ax.set_xlabel("Posición Lateral (m)")
+    ax.set_ylabel("Posición Rostro-Caudal (m)")
+    ax.set_xlim(-0.065, 0.065)
+    ax.set_ylim(-0.23, -0.07)
+    
+    plt.colorbar(im, ax=ax, label="Amplitud (µV)", shrink=0.8)
+    plt.savefig(BASE_DIR / "TOPOGRAFIA_POLARIDAD_P22.png", dpi=300)
+    plt.show()
+
+if __name__ == "__main__":
+    plot_p22_polarity_map()
