@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  6 15:44:17 2026
+
+@author: marta.navarrobernad
+"""
+
+import mne
+import numpy as np
+import matplotlib.pyplot as plt
+from pathlib import Path
+
+# =============================================================================
+# TU MONTAJE PERSONALIZADO
+# =============================================================================
+SPINAL_EXTRA = {
+    "Iz": [0.000, -0.105, 0.000], "SC1": [0.000, -0.1125, 0.000],
+    "S3": [0.000, -0.120, 0.000], "S6": [0.000, -0.140, 0.000],
+    "SC6": [0.000, -0.160, 0.000], "S14": [0.000, -0.180, 0.000],
+    "S18": [0.000, -0.200, 0.000], "S7": [0.010, -0.130, 0.000],
+    "S11": [0.010, -0.150, 0.000], "S15": [0.010, -0.170, 0.000],
+    "S19": [0.010, -0.190, 0.000], "S5": [-0.010, -0.130, 0.000],
+    "S9": [-0.010, -0.150, 0.000], "S13": [-0.010, -0.170, 0.000],
+    "S17": [-0.010, -0.190, 0.000], "S4": [-0.050, -0.140, 0.000],
+    "S8": [0.050, -0.140, 0.000], "S12": [-0.050, -0.180, 0.000],
+    "S16": [0.050, -0.190, 0.000], "AC": [0.050, -0.110, 0.000],
+    "TH6": [0.000, -0.300, 0.000], "ENG_ERB": [-0.090, -0.190, 0.000],
+    "ENG_ERB_REF": [0.090, -0.190, 0.000]
+}
+
+# Aplicar tu shift de 1cm
+for ch in SPINAL_EXTRA:
+    SPINAL_EXTRA[ch][1] -= 0.01
+
+# Orden vertical lógico para el Heatmap (Midline primero, luego laterales)
+CH_ORDER = ["Iz", "SC1", "S3", "S6", "SC6", "S14", "S18"] # Solo línea media para claridad
+
+# =============================================================================
+# CONFIGURACIÓN
+# =============================================================================
+FILTRO = "GABRIELI"
+REF = "AC"
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_DIR = BASE_DIR / "GRAND_AVERAGES_FINAL"
+
+def run_advanced_topography():
+    # Cargar SSEP y REST
+    ga_sp = mne.read_evokeds(GA_DIR / f"GA_SPINALS_{REF}_{FILTRO}-ave.fif", verbose=False)[0]
+    ga_re = mne.read_evokeds(GA_DIR / f"GA_REST_SPINALS_{REF}_{FILTRO}-ave.fif", verbose=False)[0]
+
+    # Crop a ventana de interés (N13)
+    ga_sp.crop(0.005, 0.030).apply_baseline((0.005, 0.010), verbose=False)
+    ga_re.crop(0.005, 0.030).apply_baseline((0.005, 0.010), verbose=False)
+    times = ga_sp.times * 1000
+
+    # 1. PREPARAR DATOS HEATMAP (Línea Media)
+    picks = [ch for ch in CH_ORDER if ch in ga_sp.ch_names]
+    data_sp = ga_sp.copy().pick(picks).data * 1e6
+    data_re = ga_re.copy().pick(picks).data * 1e6
+
+    # 2. CÁLCULO SNR POR CANAL (Todos los canales del montaje)
+    snr_results = {}
+    spinal_channels = [ch for ch in SPINAL_EXTRA.keys() if ch in ga_sp.ch_names and ch not in ["AC", "TH6", "ENG_ERB", "ENG_ERB_REF"]]
+    
+    for ch in spinal_channels:
+        sig = ga_sp.copy().pick(ch).data[0] * 1e6
+        noise = ga_re.copy().pick(ch).data[0] * 1e6
+        # SNR = Amplitud Pico-a-Pico / RMS del Ruido
+        p2p = np.ptp(sig)
+        rms_noise = np.sqrt(np.mean(noise**2))
+        snr_results[ch] = p2p / rms_noise
+
+    # --- VISUALIZACIÓN ---
+    fig = plt.figure(figsize=(16, 10))
+    gs = fig.add_gridspec(2, 2)
+
+    # A. Heatmap SSEP
+    ax1 = fig.add_subplot(gs[0, 0])
+    im1 = ax1.imshow(data_sp, aspect='auto', origin='upper', cmap='RdBu_r',
+                     extent=[times[0], times[-1], len(picks), 0])
+    ax1.set_yticks(np.arange(len(picks)))
+    ax1.set_yticklabels(picks)
+    ax1.set_title("Propagación Vertical SSEP (µV)")
+    plt.colorbar(im1, ax=ax1)
+
+    # B. Heatmap REST
+    ax2 = fig.add_subplot(gs[0, 1])
+    im2 = ax2.imshow(data_re, aspect='auto', origin='upper', cmap='RdBu_r',
+                     extent=[times[0], times[-1], len(picks), 0], vmin=im1.get_clim()[0], vmax=im1.get_clim()[1])
+    ax2.set_title("Ruido de Fondo REST (µV)")
+    plt.colorbar(im2, ax=ax2)
+
+    # C. Gráfico de SNR por posición Y (médula)
+    ax3 = fig.add_subplot(gs[1, :])
+    y_coords = [SPINAL_EXTRA[ch][1] for ch in spinal_channels]
+    snr_values = [snr_results[ch] for ch in spinal_channels]
+    
+    scatter = ax3.scatter(y_coords, snr_values, c=snr_values, cmap='viridis', s=100, edgecolors='black')
+    for i, ch in enumerate(spinal_channels):
+        ax3.annotate(ch, (y_coords[i], snr_values[i]), xytext=(5, 5), textcoords='offset points')
+    
+    ax3.set_xlabel("Posición Rostro-Caudal (m)")
+    ax3.set_ylabel("SNR (Signal-to-Noise Ratio)")
+    ax3.set_title("Calidad de Señal según Posición en el Montaje")
+    ax3.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+    # Imprimir el Top 3
+    top_channels = sorted(snr_results.items(), key=lambda x: x[1], reverse=True)[:3]
+    print("\n--- CANALES CON MEJOR CALIDAD DE SEÑAL ---")
+    for ch, val in top_channels:
+        print(f"Canal {ch}: SNR = {val:.2f}")
+
+if __name__ == "__main__":
+    run_advanced_topography()
