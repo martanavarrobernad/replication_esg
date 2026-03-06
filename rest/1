@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Automatic Pipeline for Resting State: Re-reference + Fixed Epoching + ECG Gating
+"""
+
+import mne
+import numpy as np
+from pathlib import Path
+import gc
+import re
+
+# =============================================================================
+# CONFIGURACIÓN AUTOMÁTICA
+# =============================================================================
+SUBJECT_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+
+# Parámetros espejo de tus SSEPs
+TMIN, TMAX = -0.850, 0.600  
+BASELINE = (-0.800, 0.000) 
+REFS_TO_USE = ["AC", "TH6"] 
+
+def run_full_resting_automation():
+    # 1. BUSCAR TODOS LOS ARCHIVOS DE DESCANSO (.vhdr)
+    # Buscamos archivos que contengan "Rest" en el nombre
+    input_files = sorted(list(SUBJECT_DIR.glob("*Rest*.vhdr")))
+    
+    if not input_files:
+        print(f"[-] No se encontraron archivos .vhdr con la palabra 'Rest' en {SUBJECT_DIR}")
+        return
+
+    print(f"--- INICIANDO PROCESADO AUTOMÁTICO DE {len(input_files)} ARCHIVOS DE DESCANSO ---")
+    
+    for f_path in input_files:
+        print(f"\n" + "="*50)
+        print(f">> PROCESANDO: {f_path.name}")
+        
+        try:
+            # Cargar el archivo original de BrainVision
+            raw_orig = mne.io.read_raw_brainvision(f_path, preload=True, verbose=False)
+            
+            for ref_name in REFS_TO_USE:
+                print(f"\n   [*] Aplicando Re-referencia: {ref_name}")
+                raw = raw_orig.copy()
+                
+                # APLICAR RE-REFERENCIA
+                if ref_name in raw.ch_names:
+                    raw.set_eeg_reference(ref_channels=[ref_name], verbose=False)
+                else:
+                    print(f"   [!] Salto: No existe el canal {ref_name} en este archivo.")
+                    continue
+
+                # GENERAR EVENTOS FICTICIOS (Cada 1.0s para evitar solapamientos)
+                # Creamos eventos cada segundo para trocear el resting state
+                events = mne.make_fixed_length_events(raw, id=999, start=2.0, duration=1.0)
+                
+                # EPOCHING (Mismos parámetros que SSEP)
+                epochs = mne.Epochs(raw, events, event_id={'Resting': 999}, 
+                                    tmin=TMIN, tmax=TMAX, baseline=BASELINE, 
+                                    preload=True, verbose=False)
+                
+                n_initial = len(epochs)
+
+                # ECG GATING (Misma lógica +/- 150ms)
+                if 'ECG' in raw.ch_names:
+                    ecg_events, _, _ = mne.preprocessing.find_ecg_events(raw, ch_name='ECG', verbose=False)
+                    sr = raw.info['sfreq']
+                    win_samps = int(0.150 * sr)
+                    
+                    bad_samples = set()
+                    for r_peak in ecg_events[:, 0]:
+                        bad_samples.update(range(r_peak - win_samps, r_peak + win_samps))
+                    
+                    epochs_to_drop = [i for i, smp in enumerate(epochs.events[:, 0]) if smp in bad_samples]
+                    
+                    if epochs_to_drop:
+                        epochs.drop(epochs_to_drop, reason='ECG_coincidence', verbose=False)
+                        print(f"      -> ECG Gating: {len(epochs_to_drop)} épocas eliminadas.")
+                    else:
+                        print("      -> ECG Gating: 0 épocas eliminadas.")
+
+                # GUARDADO CON NOMBRE ESTRUCTURADO
+                # Ejemplo: Clean_Epochs_Run1_Rest_RefAC_REST-epo.fif
+                out_name = f"Clean_Epochs_{f_path.stem}_Ref{ref_name}_REST-epo.fif"
+                epochs.save(SUBJECT_DIR / out_name, overwrite=True, verbose=False)
+                
+                print(f"   [OK] Guardado: {out_name} ({len(epochs)} épocas finales)")
+                
+                # Limpieza de memoria
+                del raw, epochs
+                gc.collect()
+
+        except Exception as e:
+            print(f"   [!!!] ERROR CRÍTICO en {f_path.name}: {e}")
+
+    print("\n" + "="*50)
+    print("--- PROCESO AUTOMÁTICO DE RESTING COMPLETADO ---")
+
+if __name__ == "__main__":
+    run_full_resting_automation()
