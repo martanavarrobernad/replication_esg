@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Fri Mar  6 16:34:43 2026
+
+@author: marta.navarrobernad
+"""
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import mne
+import matplotlib.pyplot as plt
+import numpy as np
+from pathlib import Path
+from scipy.interpolate import griddata
+
+# =============================================================================
+# TU MONTAJE DEFINITIVO (Fijado y Correcto)
+# =============================================================================
+SPINAL_EXTRA = {
+    "Iz":  [0.000, -0.090], 
+    "SC1": [0.000, -0.105],
+    "S3":  [0.000, -0.120],
+    "S6":  [0.000, -0.1325],
+    "S7":  [0.010, -0.145], "S5":  [-0.010, -0.145], 
+    "SC6": [0.000, -0.160],
+    "S11": [0.010, -0.170], "S9":  [-0.010, -0.170], 
+    "S14": [0.000, -0.180],
+    "S15": [0.010, -0.190], "S13": [-0.010, -0.190], 
+    "S18": [0.000, -0.200],
+    "S19": [0.010, -0.210], "S17": [-0.010, -0.210],
+    "S4":  [-0.050, -0.1325], "S8":  [0.050, -0.1325], 
+    "S12": [-0.050, -0.190],  "S16": [0.050, -0.190],
+    "AC":  [0.050, -0.100],   "TH6": [0.000, -0.300]
+}
+
+# Aplicar shift de 1cm
+for ch in SPINAL_EXTRA:
+    SPINAL_EXTRA[ch][1] -= 0.01
+
+BASE_DIR = Path("/home/marta.navarrobernad/Desktop/sub-P02/eeg")
+GA_PATH = BASE_DIR / "GRAND_AVERAGES_FINAL" / "GA_SPINALS_AC_GABRIELI-ave.fif"
+
+def plot_p22_series_correct_montage():
+    if not GA_PATH.exists(): return
+    
+    evoked = mne.read_evokeds(GA_PATH, verbose=False)[0]
+    evoked.apply_baseline((0.000, 0.005), verbose=False)
+    
+    # Ventana P22: 20, 20.5, 21, 21.5, 22, 22.5, 23, 23.5, 24 ms
+    times_to_plot = np.arange(0.020, 0.0245, 0.0005)
+    spinal_picks = [ch for ch in SPINAL_EXTRA.keys() if ch in evoked.ch_names]
+    points = np.array([SPINAL_EXTRA[ch][:2] for ch in spinal_picks])
+    
+    fig, axes = plt.subplots(3, 3, figsize=(15, 18))
+    axes = axes.flatten()
+    
+    # Escala fija basada en el pico máximo positivo de la P22
+    v_peak = np.max(np.abs(evoked.copy().pick(spinal_picks).crop(0.020, 0.025).data)) * 1e6
+
+    for i, t in enumerate(times_to_plot):
+        v_data = evoked.copy().pick(spinal_picks).crop(t, t).data.flatten() * 1e6
+        
+        # Interpolación sobre tu rejilla rectangular
+        grid_x, grid_y = np.mgrid[-0.06:0.06:150j, -0.25:-0.08:200j]
+        grid_z = griddata(points, v_data, (grid_x, grid_y), method='cubic')
+        
+        # RdBu_r: Rojo = Positivo (P22)
+        im = axes[i].imshow(grid_z.T, extent=(-0.06, 0.06, -0.25, -0.07), origin='lower',
+                            cmap='RdBu_r', vmin=-v_peak, vmax=v_peak, aspect='auto')
+        
+        # Dibujar electrodos
+        for name, (px, py) in SPINAL_EXTRA.items():
+            if name in spinal_picks:
+                axes[i].plot(px, py, 'ko', markersize=2, alpha=0.4)
+        
+        axes[i].set_title(f"T = {t*1000:.1f} ms", fontsize=10, fontweight='bold')
+        axes[i].axis('off')
+
+    plt.suptitle("SERIE TEMPORAL P22 (CORTICAL) - MONTAJE REAL P02", fontsize=16, fontweight='bold', y=0.95)
+    
+    cbar_ax = fig.add_axes([0.92, 0.2, 0.02, 0.6])
+    fig.colorbar(im, cax=cbar_ax, label="Amplitud (µV)")
+    
+    plt.savefig(BASE_DIR / "P22_SERIES_MONTAJE_REAL.png", dpi=300)
+    plt.show()
+
+if __name__ == "__main__":
+    plot_p22_series_correct_montage()
