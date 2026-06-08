@@ -223,13 +223,13 @@ raw_viz.plot(
     block=True
 )
 
-# ✅ COPIAR BAD CHANNELS marcados en la GUI (raw_viz) al raw principal
+# COPIAR BAD CHANNELS marcados en la GUI (raw_viz) al raw principal
 raw.info["bads"] = sorted(set(raw.info.get("bads", []) + raw_viz.info.get("bads", [])))
 print("Bad channels en RAW (tras GUI):", raw.info["bads"])
 
-# 🔍 COMPROBACIÓN DE SEGURIDAD
+# COMPROBACIÓN DE SEGURIDAD
 assert set(raw_viz.info.get("bads", [])).issubset(set(raw.info.get("bads", []))), \
-    "❌ Algunos canales marcados como malos en la GUI no se copiaron al raw principal"
+    " Algunos canales marcados como malos en la GUI no se copiaron al raw principal"
 
 
 
@@ -381,7 +381,7 @@ with open(ica_json, "w", encoding="utf-8") as f:
         ensure_ascii=False,
     )
 
-print("\n✅ DONE")
+print("\nDONE")
 print("Raw:", raw_fif)
 print("Annotations manual:", manual_csv)
 print("Annotations all:", all_csv)
