@@ -51,10 +51,10 @@ def interpolate_artifact(inst, events, t_min, t_max):
 # =============================================================================
 vhdr_files = sorted(list(data_dir.glob("*Run*.vhdr")))
 if not vhdr_files:
-    print("❌ Error: No se encontraron archivos .vhdr")
+    print(" Error: No se encontraron archivos .vhdr")
     exit()
 
-print(f"🔬 Procesando {len(vhdr_files)} runs (Solo Axila)...")
+print(f"Procesando {len(vhdr_files)} runs (Solo Axila)...")
 
 raw_left_list  = []
 raw_right_list = []
@@ -117,17 +117,17 @@ for vhdr_file in vhdr_files:
         gc.collect()
 
     except Exception as e:
-        print(f"⚠️ Error en archivo {vhdr_file.name}: {e}")
+        print(f" Error en archivo {vhdr_file.name}: {e}")
         continue
 
 # =============================================================================
 # 3. VISUALIZACIÓN
 # =============================================================================
 if not proc_left_list:
-    print("❌ No se generaron datos.")
+    print(" No se generaron datos.")
     exit()
 
-print("📊 Generando gráfica PLOS Biology...")
+print(" Generando gráfica PLOS Biology...")
 ga_raw_L  = mne.combine_evoked(raw_left_list, weights='nave')
 ga_raw_R  = mne.combine_evoked(raw_right_list, weights='nave')
 ga_proc_L = mne.combine_evoked(proc_left_list, weights='nave')
