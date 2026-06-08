@@ -9,7 +9,7 @@ Created on Mon Jan 12 18:30:56 2026
 # -*- coding: utf-8 -*-
 
 """
-PIPELINE ÚNICO (como antes, sin Step0) — sub-P01 Run1
+PIPELINE ÚNICO
 
 Orden:
 1) Load .vhdr -> resample
@@ -234,12 +234,12 @@ def refine_events_by_stim_artifact(raw: mne.io.BaseRaw, events: np.ndarray):
         print("⚠ No refined events found; keeping original events.")
         return events
 
-    print(f"✅ Jitter correction: refined {len(refined)}/{len(events)} events")
+    print(f"Jitter correction: refined {len(refined)}/{len(events)} events")
     return refined
 
 def reref_misc_to_th6(raw: mne.io.BaseRaw):
     if "TH6" not in raw.ch_names:
-        print("⚠ TH6 not found; skipping MISC re-reference.")
+        print("TH6 not found; skipping MISC re-reference.")
         return
 
     th6_idx = raw.ch_names.index("TH6")
@@ -247,13 +247,13 @@ def reref_misc_to_th6(raw: mne.io.BaseRaw):
     picks_misc = [i for i in picks_misc_all if raw.ch_names[i] != "TH6"]
 
     if len(picks_misc) == 0:
-        print("⚠ No MISC channels (excluding TH6) to re-reference.")
+        print("No MISC channels (excluding TH6) to re-reference.")
         return
 
     ref = raw.get_data(picks=[th6_idx])
     data = raw.get_data(picks=picks_misc)
     raw._data[picks_misc, :] = data - ref
-    print("✅ Re-referenced MISC to TH6 (X := X - TH6).")
+    print(" Re-referenced MISC to TH6 (X := X - TH6).")
 
 def _event_keys(events: np.ndarray):
     return np.array([(int(e[0]), int(e[2])) for e in events], dtype=[("s", int), ("c", int)])
@@ -334,7 +334,7 @@ def main():
     events_final = ecg_gate_events(raw, events)
 
     # --------------------------------------------------
-    # 🔁 ACTUALIZAR ANNOTATIONS PARA REFLEJAR events_final
+    #  ACTUALIZAR ANNOTATIONS PARA REFLEJAR events_final
     # (para que la GUI muestre SOLO los eventos tras ECG gating)
     # --------------------------------------------------
     inv = {v: k for k, v in event_id.items()}  # code -> description
@@ -515,7 +515,7 @@ def main():
             ensure_ascii=False
         )
 
-    print("\n✅ DONE")
+    print("\n DONE")
     print("Raw clean:", RAW_CLEAN_FIF)
     print("EEG epochs:", EEG_EPO_FIF)
     print("MISC epochs:", MISC_EPO_FIF)
